@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rome Climate Monitor</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;font-family:system-ui,sans-serif;background:#f5f5f0;overflow:hidden}
+#map{position:absolute;inset:0;z-index:0}
+.topbar{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:1000;display:flex;align-items:center;gap:7px;background:rgba(255,255,255,0.96);border:1px solid #e0ddd6;border-radius:99px;padding:6px 14px;white-space:nowrap;box-shadow:0 2px 12px rgba(0,0,0,0.1)}
+.app-title{font-size:12px;font-weight:600;color:#1a1a1a;letter-spacing:.03em}
+.divider{width:1px;height:16px;background:#ddd}
+.lpill{font-size:11px;padding:4px 10px;border-radius:99px;border:1px solid #e0ddd6;cursor:pointer;font-weight:500;background:transparent;color:#666;transition:all .18s}
+.lpill:hover{background:#f5f0e8;color:#333}
+.lpill.ah{background:#fee2e2;color:#dc2626;border-color:#fca5a5}
+.lpill.ag{background:#dcfce7;color:#16a34a;border-color:#86efac}
+.lpill.ab{background:#ede9fe;color:#7c3aed;border-color:#c4b5fd}
+.langbtn{font-size:10px;padding:3px 8px;border-radius:99px;border:1px solid #e0ddd6;cursor:pointer;background:transparent;color:#888;font-weight:600;transition:all .15s}
+.langbtn.active{background:#1a1a1a;color:#fff;border-color:#1a1a1a}
+
+/* SIDEBAR */
+.sidebar{position:absolute;left:10px;top:10px;bottom:10px;z-index:1000;width:260px;display:flex;flex-direction:column;gap:7px;overflow-y:auto;pointer-events:none}
+.sidebar>*{pointer-events:all}
+.card{background:rgba(255,255,255,0.97);border:1px solid #e8e4dc;border-radius:12px;padding:11px 13px;box-shadow:0 1px 6px rgba(0,0,0,0.06)}
+.card-title{font-size:10px;font-weight:600;letter-spacing:.07em;color:#999;text-transform:uppercase;margin-bottom:8px}
+
+/* ROME OVERVIEW */
+.ov-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}
+.ov-cell{background:#f9f7f3;border-radius:8px;padding:6px 4px;text-align:center}
+.ov-val{font-size:13px;font-weight:700;color:#1a1a1a}
+.ov-lbl{font-size:8px;color:#aaa;margin-top:1px}
+.sun-row{display:flex;justify-content:space-around;margin-top:7px;padding-top:7px;border-top:1px solid #f0ede8;font-size:11px;color:#555}
+
+/* TIME TABS */
+.time-tabs{display:flex;gap:3px;flex-wrap:wrap;margin-bottom:6px}
+.ttab{font-size:10px;padding:3px 7px;border-radius:6px;border:1px solid #e0ddd6;cursor:pointer;background:transparent;color:#666;transition:all .15s;white-space:nowrap}
+.ttab:hover{background:#f5f0e8}
+.ttab.active{background:#1a1a1a;color:#fff;border-color:#1a1a1a}
+.ttab.real{border-color:#3b82f6;color:#2563eb}.ttab.real.active{background:#2563eb;color:#fff}
+.ttab.fcast{border-color:#f59e0b;color:#d97706}.ttab.fcast.active{background:#d97706;color:#fff}
+.hist-label{font-size:11px;font-weight:600;color:#1a1a1a;margin-bottom:3px}
+input[type=range]{width:100%;accent-color:#1a1a1a}
+.dbadge{display:inline-flex;font-size:9px;padding:2px 7px;border-radius:99px;margin-top:4px;font-weight:500}
+.blive{background:#dcfce7;color:#15803d}.bfcast{background:#fef3c7;color:#b45309}.bhist{background:#f3f4f6;color:#6b7280}
+
+/* METRIC HEADER ROW (with tooltips) */
+.metric-hdr{display:flex;align-items:center;gap:5px;margin-bottom:6px;flex-wrap:wrap}
+.mhdr-item{display:flex;align-items:center;gap:2px;font-size:10px;font-weight:600;position:relative}
+.tip-icon{display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;border-radius:50%;background:#e9e9e9;color:#888;font-size:8px;cursor:default;font-weight:700;margin-left:2px}
+.tip-icon:hover .tip-box,.tip-icon:focus .tip-box{display:block}
+.tip-box{display:none;position:absolute;left:16px;top:-2px;z-index:9999;background:#1f2937;color:#f9fafb;font-size:10px;line-height:1.55;padding:8px 10px;border-radius:9px;width:200px;font-weight:400;box-shadow:0 4px 18px rgba(0,0,0,0.22);pointer-events:none;white-space:normal}
+.tip-box::before{content:'';position:absolute;left:-5px;top:9px;border:5px solid transparent;border-right-color:#1f2937;border-left:none}
+
+/* DIST LIST */
+.dist-list{display:flex;flex-direction:column;gap:4px;max-height:205px;overflow-y:auto}
+.dist-item{display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:8px;cursor:pointer;border:1px solid transparent;transition:all .15s}
+.dist-item:hover{background:#f9f7f3}
+.dist-item.sel{background:#f0eeff;border-color:#c4b5fd}
+.dname{font-size:11px;font-weight:500;color:#1a1a1a}
+.dmeta{font-size:10px;color:#888;margin-top:1px}
+.dpill{font-size:10px;font-weight:700;padding:2px 7px;border-radius:99px;white-space:nowrap;cursor:default}
+.dph{background:#fee2e2;color:#dc2626}.dpm{background:#fef3c7;color:#b45309}.dpl{background:#dcfce7;color:#15803d}
+
+/* COMPARE */
+.cmp-sel{flex:1;font-size:11px;background:#fff;border:1px solid #e0ddd6;color:#1a1a1a;padding:4px 5px;border-radius:7px}
+.cmp-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:7px}
+.cmp-cell{background:#f9f7f3;border-radius:8px;padding:7px;text-align:center}
+.cmp-nm{font-size:10px;color:#888;margin-bottom:2px}
+.cmp-v{font-size:15px;font-weight:700;color:#1a1a1a}
+.cmp-u{font-size:9px;color:#bbb}
+.dchips{display:flex;gap:4px;margin-top:6px}
+.dchip{flex:1;font-size:10px;font-weight:600;text-align:center;padding:3px;border-radius:6px}
+
+/* ALERTS */
+.aform input,.aform select{width:100%;font-size:11px;background:#fff;border:1px solid #e0ddd6;color:#1a1a1a;padding:5px 7px;border-radius:7px;margin-bottom:4px}
+.aform input::placeholder{color:#ccc}
+.abtn{width:100%;padding:6px;font-size:11px;font-weight:600;border:none;border-radius:7px;cursor:pointer;background:#1a1a1a;color:#fff}
+.amsg{font-size:10px;margin-top:4px;padding:4px 7px;border-radius:6px;display:none}
+
+/* LEGEND */
+.leg-row{display:flex;align-items:center;gap:7px;font-size:10px;color:#666;margin-bottom:4px}
+.leg-bar{width:66px;height:6px;border-radius:3px}
+.src-note{font-size:9px;color:#ccc;text-align:center;margin-top:3px}
+
+/* POPUP */
+.popup{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);z-index:2000;background:rgba(255,255,255,0.98);border:1px solid #e0ddd6;border-radius:14px;padding:12px 16px;display:none;min-width:240px;text-align:center;pointer-events:none;box-shadow:0 4px 20px rgba(0,0,0,0.13)}
+.pu-name{font-size:14px;font-weight:600;color:#1a1a1a;margin-bottom:6px}
+.pu-stats{display:flex;gap:8px;justify-content:center;margin-bottom:6px;flex-wrap:wrap}
+.pu-col{display:flex;flex-direction:column;align-items:center;position:relative}
+.pu-val{font-size:16px;font-weight:700}
+.pu-lbl{font-size:9px;color:#aaa;text-transform:uppercase;letter-spacing:.05em}
+.pu-hint{font-size:9px;color:#bbb;margin-top:1px;font-style:italic;max-width:60px;text-align:center;line-height:1.3}
+.pu-tip{position:relative;cursor:default}
+.pu-tip:hover .pu-tip-box{display:block}
+.pu-tip-box{display:none;position:absolute;bottom:110%;left:50%;transform:translateX(-50%);z-index:9999;background:#1f2937;color:#f9fafb;font-size:10px;line-height:1.55;padding:8px 10px;border-radius:9px;width:180px;font-weight:400;box-shadow:0 4px 18px rgba(0,0,0,0.2);pointer-events:none;white-space:normal;text-align:left}
+.pu-bar-bg{height:4px;background:#eee;border-radius:2px;overflow:hidden;margin-top:3px}
+.pu-bar-fill{height:100%;border-radius:2px;transition:width .5s}
+.pu-cloud{font-size:9px;color:#ccc;margin-top:4px}
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<!-- TOPBAR -->
+<div class="topbar">
+  <span class="app-title" id="t-title">Rome Climate Monitor</span>
+  <div class="divider"></div>
+  <button class="lpill ah" id="b-heat" onclick="setLayer('heat')">🔥 <span id="t-heat">Heat</span></button>
+  <button class="lpill" id="b-green" onclick="setLayer('green')">🌿 <span id="t-green">Green</span></button>
+  <button class="lpill" id="b-both" onclick="setLayer('both')">✨ <span id="t-both">Both</span></button>
+  <div class="divider"></div>
+  <button class="langbtn active" id="lb-en" onclick="setLang('en')">EN</button>
+  <button class="langbtn" id="lb-it" onclick="setLang('it')">IT</button>
+</div>
+
+<!-- SIDEBAR (LEFT) -->
+<div class="sidebar">
+
+  <!-- 1. ROME OVERVIEW (sticky) -->
+  <div class="card">
+    <div class="card-title" id="t-overview">Rome Today</div>
+    <div class="ov-grid">
+      <div class="ov-cell"><div class="ov-val" id="ov-temp">–</div><div class="ov-lbl" id="t-ov-air">Air Max/Min</div></div>
+      <div class="ov-cell"><div class="ov-val" id="ov-hum">–</div><div class="ov-lbl" id="t-ov-hum">Humidity</div></div>
+      <div class="ov-cell"><div class="ov-val" id="ov-pres">–</div><div class="ov-lbl" id="t-ov-pres">hPa</div></div>
+      <div class="ov-cell"><div class="ov-val" id="ov-uv">–</div><div class="ov-lbl">UV Index</div></div>
+      <div class="ov-cell"><div class="ov-val" id="ov-cloud">–</div><div class="ov-lbl" id="t-ov-cloud">Cloud %</div></div>
+      <div class="ov-cell"><div class="ov-val" id="ov-wind">–</div><div class="ov-lbl" id="t-ov-wind">Wind km/h</div></div>
+    </div>
+    <div class="sun-row">
+      <span>🌅 <span id="ov-rise">–</span></span>
+      <span>🌇 <span id="ov-set">–</span></span>
+    </div>
+  </div>
+
+  <!-- 2. TIME -->
+  <div class="card">
+    <div class="card-title" id="t-period">Period</div>
+    <div class="time-tabs" id="time-tabs"></div>
+    <div id="hist-wrap" style="display:none">
+      <div class="hist-label" id="hist-lbl">Jul 2023</div>
+      <input type="range" min="0" max="23" value="0" id="hslider">
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:#ccc;margin-top:2px"><span>Jul 2023</span><span>Jun 2025</span></div>
+    </div>
+    <div id="dbadge"></div>
+  </div>
+
+  <!-- 3. DISTRICTS with metric tooltips -->
+  <div class="card">
+    <div class="card-title" id="t-districts">Districts</div>
+    <!-- Metric header with tooltips -->
+    <div class="metric-hdr">
+      <div class="mhdr-item" style="color:#dc2626">
+        LST
+        <span class="tip-icon" tabindex="0">?
+          <div class="tip-box" id="tip-lst"></div>
+        </span>
+      </div>
+      <span style="color:#ddd;font-size:10px">·</span>
+      <div class="mhdr-item" style="color:#16a34a">
+        NDVI
+        <span class="tip-icon" tabindex="0">?
+          <div class="tip-box" id="tip-ndvi"></div>
+        </span>
+      </div>
+      <span style="color:#ddd;font-size:10px">·</span>
+      <div class="mhdr-item" style="color:#0ea5e9">
+        RH%
+        <span class="tip-icon" tabindex="0">?
+          <div class="tip-box" id="tip-hum"></div>
+        </span>
+      </div>
+      <span style="color:#ddd;font-size:10px">·</span>
+      <div class="mhdr-item" style="color:#7c3aed">
+        Score
+        <span class="tip-icon" tabindex="0">?
+          <div class="tip-box" id="tip-score"></div>
+        </span>
+      </div>
+    </div>
+    <div class="dist-list" id="dist-list"></div>
+  </div>
+
+  <!-- 4. COMPARE -->
+  <div class="card">
+    <div class="card-title" id="t-compare">Compare</div>
+    <div style="display:flex;gap:5px">
+      <select class="cmp-sel" id="ca" onchange="updateCmp()"></select>
+      <select class="cmp-sel" id="cb" onchange="updateCmp()"></select>
+    </div>
+    <div class="cmp-grid" id="cmp-grid"></div>
+    <div class="dchips" id="dchips"></div>
+  </div>
+
+  <!-- 5. ALERTS -->
+  <div class="card">
+    <div class="card-title" id="t-alerts">Alerts</div>
+    <div class="aform">
+      <select id="al-d"><option value="" id="t-al-ph">Select district...</option></select>
+      <input id="al-email" type="email" placeholder="your@email.com">
+      <div style="display:flex;gap:4px;margin-bottom:4px">
+        <div style="flex:1"><div style="font-size:9px;color:#aaa;margin-bottom:2px" id="t-al-lst">Max LST °C</div><input id="al-lst" type="number" value="38" min="20" max="50" style="margin:0"></div>
+        <div style="flex:1"><div style="font-size:9px;color:#aaa;margin-bottom:2px" id="t-al-ndvi">Min NDVI</div><input id="al-ndvi" type="number" value="0.1" min="0" max="1" step="0.05" style="margin:0"></div>
+      </div>
+      <button class="abtn" onclick="doAlert()" id="t-al-btn">Subscribe to alerts</button>
+      <div class="amsg" id="amsg"></div>
+    </div>
+  </div>
+
+  <!-- 6. LEGEND -->
+  <div class="card">
+    <div class="card-title" id="t-legend">Legend</div>
+    <div class="leg-row"><div class="leg-bar" style="background:linear-gradient(to right,#bfdbfe,#fbbf24,#ef4444)"></div><span id="t-leg-heat">LST cool → hot</span></div>
+    <div class="leg-row"><div class="leg-bar" style="background:linear-gradient(to right,#d4b483,#bbf7d0,#166534)"></div><span id="t-leg-green">NDVI bare → green</span></div>
+    <div class="leg-row"><div style="width:66px;height:6px;border-radius:3px;background:repeating-linear-gradient(45deg,#ddd,#ddd 2px,#f9f9f9 2px,#f9f9f9 5px)"></div><span id="t-leg-cloud">Cloud-masked</span></div>
+    <div class="src-note" id="t-src">Sentinel-2 NDVI + Open-Meteo LST</div>
+  </div>
+
+</div>
+
+<!-- POPUP (district detail on click) -->
+<div class="popup" id="popup">
+  <div class="pu-name" id="pu-name"></div>
+  <div class="pu-stats">
+    <div class="pu-col pu-tip">
+      <div class="pu-val" id="pu-lst" style="color:#dc2626">–</div>
+      <div class="pu-lbl">LST °C</div>
+      <div class="pu-hint" id="pu-lst-air"></div>
+      <div class="pu-tip-box" id="ptip-lst"></div>
+    </div>
+    <div class="pu-col pu-tip">
+      <div class="pu-val" id="pu-ndvi" style="color:#16a34a">–</div>
+      <div class="pu-lbl">NDVI</div>
+      <div class="pu-hint" id="pu-ndvi-hint"></div>
+      <div class="pu-tip-box" id="ptip-ndvi"></div>
+    </div>
+    <div class="pu-col">
+      <div class="pu-val" id="pu-hum" style="color:#0ea5e9">–</div>
+      <div class="pu-lbl" id="t-pu-hum">Humidity</div>
+    </div>
+    <div class="pu-col pu-tip">
+      <div class="pu-val" id="pu-score" style="color:#7c3aed">–</div>
+      <div class="pu-lbl">Score</div>
+      <div class="pu-hint" id="pu-score-hint"></div>
+      <div class="pu-tip-box" id="ptip-score"></div>
+    </div>
+  </div>
+  <div class="pu-bar-bg"><div class="pu-bar-fill" id="pu-bar" style="background:#7c3aed;width:0%"></div></div>
+  <div class="pu-cloud" id="pu-cloud"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// TRANSLATIONS
+// ─────────────────────────────────────────────────────────────────────────────
+const TR = {
+en:{
+  title:'Rome Climate Monitor', heat:'Heat', green:'Green', both:'Both',
+  overview:'Rome Today', air:'Max/Min Air', hum:'Humidity', pres:'Pressure', cloud:'Cloud %', wind:'Wind km/h',
+  period:'Period', today:'Today', history:'History',
+  districts:'Districts', compare:'Compare', alerts:'Alerts', legend:'Legend',
+  alPh:'Select district...', alLst:'Max LST °C', alNdvi:'Min NDVI', alBtn:'Subscribe to alerts',
+  alFill:'Please fill both fields.', alOk:'Subscribed! Livability: ', alActive:'Active alerts: ',
+  legHeat:'LST cool → hot', legGreen:'NDVI bare → green', legCloud:'Cloud-masked pixels',
+  src:'Sentinel-2 NDVI + Open-Meteo LST', puHum:'Humidity',
+  badgeLive:'Live — Open-Meteo', badgeFcast:'Open-Meteo forecast', badgeHist:'Sentinel-2 historical',
+  tipLst:'LST = Land Surface Temperature. Temperatura powierzchni (ziemi, asfaltu, dachów) mierzona satelitarnie.\nJest wyższa od temperatury powietrza w obszarach zurbanizowanych — efekt "wyspy ciepła".',
+  tipNdvi:'NDVI = Normalized Difference Vegetation Index. Indeks roślinności od −1 do 1.\n0.8+ = gęsty park · 0.3–0.5 = trawniki · <0.2 = beton/asfalt\nDane z satelity Sentinel-2.',
+  tipHum:'RH = Relative Humidity. Wilgotność względna powietrza (%).\nWysoka wilgotność + wysoka temperatura = efekt "odczuwalnego gorąca". Parki i tereny zielone mają wyższą wilgotność i niższą odczuwalną temperaturę.',
+  tipScore:'Livability Score 0–100. Indeks mieszkalności obliczony z:\n• Temperatury LST (im niższa tym lepiej)\n• NDVI — roślinności (im wyższe tym lepiej)\n• Pokrycia chmurami\n\n80–100 = doskonały · 60–80 = dobry · 40–60 = umiarkowany · <40 = krytyczny',
+  tipMapLst:'Wartości: max/min temperatura powietrza z Open-Meteo.\nNajwyższe wartości LST oznaczają obszary najbardziej narażone na upały.',
+  tipMapScore:'Score na mapce = Livability Score 0–100.\nIm wyższy, tym przyjemniej w tej dzielnicy podczas upałów.',
+  ndviLow:'Concrete / asphalt', ndviMid:'Sparse vegetation', ndviGood:'Mixed green', ndviHigh:'Dense park',
+  scoreLow:'Critical heat', scoreMid:'Moderate', scoreGood:'Good', scoreHigh:'Excellent livability',
+},
+it:{
+  title:'Monitor Clima Roma', heat:'Calore', green:'Verde', both:'Entrambi',
+  overview:'Roma Oggi', air:'Max/Min Aria', hum:'Umidità', pres:'Pressione', cloud:'Nuvolosità %', wind:'Vento km/h',
+  period:'Periodo', today:'Oggi', history:'Storico',
+  districts:'Quartieri', compare:'Confronta', alerts:'Avvisi', legend:'Legenda',
+  alPh:'Seleziona quartiere...', alLst:'Max LST °C', alNdvi:'Min NDVI', alBtn:'Iscriviti agli avvisi',
+  alFill:'Compila tutti i campi.', alOk:'Iscritto! Vivibilità: ', alActive:'Avvisi attivi: ',
+  legHeat:'LST freddo → caldo', legGreen:'NDVI nudo → verde', legCloud:'Pixel nuvolosi rimossi',
+  src:'Sentinel-2 NDVI + Open-Meteo LST', puHum:'Umidità',
+  badgeLive:'Live — Open-Meteo', badgeFcast:'Previsione Open-Meteo', badgeHist:'Storico Sentinel-2',
+  tipLst:'LST = Land Surface Temperature. Temperatura della superficie terrestre (asfalto, tetti, suolo) misurata da satellite.\nNei centri urbani è significativamente più alta della temperatura dell\'aria — effetto "isola di calore".',
+  tipNdvi:'NDVI = Indice di Vegetazione. Valore da −1 a 1.\n0.8+ = parco denso · 0.3–0.5 = prati · <0.2 = cemento/asfalto\nDati dal satellite Sentinel-2.',
+  tipHum:'RH = Umidità Relativa (%).\nAlta umidità + alta temperatura = sensazione di caldo maggiore. Le aree verdi tendono ad avere umidità più alta e temperatura percepita più bassa.',
+  tipScore:'Livability Score 0–100. Indice di vivibilità calcolato da:\n• Temperatura LST (più bassa = meglio)\n• NDVI (più verde = meglio)\n• Copertura nuvolosa\n\n80–100 = eccellente · 60–80 = buono · 40–60 = moderato · <40 = critico',
+  tipMapLst:'Valori: temperatura massima/minima dell\'aria da Open-Meteo.\nI valori LST più alti indicano le aree più esposte al calore.',
+  tipMapScore:'Score sulla mappa = Indice di Vivibilità 0–100.\nPiù alto è, più piacevole è il quartiere durante le ondate di calore.',
+  ndviLow:'Cemento/asfalto', ndviMid:'Scarsa vegetazione', ndviGood:'Verde misto', ndviHigh:'Parco denso',
+  scoreLow:'Calore critico', scoreMid:'Moderato', scoreGood:'Buono', scoreHigh:'Vivibilità eccellente',
+}};
+
+let LANG='en';
+function T(k){ return (TR[LANG]&&TR[LANG][k]) || TR.en[k] || k; }
+
+function applyLang(){
+  document.getElementById('t-title').textContent=T('title');
+  document.getElementById('t-heat').textContent=T('heat');
+  document.getElementById('t-green').textContent=T('green');
+  document.getElementById('t-both').textContent=T('both');
+  document.getElementById('t-overview').textContent=T('overview');
+  document.getElementById('t-ov-air').textContent=T('air');
+  document.getElementById('t-ov-hum').textContent=T('hum');
+  document.getElementById('t-ov-pres').textContent=T('pres');
+  document.getElementById('t-ov-cloud').textContent=T('cloud');
+  document.getElementById('t-ov-wind').textContent=T('wind');
+  document.getElementById('t-period').textContent=T('period');
+  document.getElementById('t-districts').textContent=T('districts');
+  document.getElementById('t-compare').textContent=T('compare');
+  document.getElementById('t-alerts').textContent=T('alerts');
+  document.getElementById('t-legend').textContent=T('legend');
+  document.getElementById('t-al-lst').textContent=T('alLst');
+  document.getElementById('t-al-ndvi').textContent=T('alNdvi');
+  document.getElementById('t-al-btn').textContent=T('alBtn');
+  document.getElementById('t-leg-heat').textContent=T('legHeat');
+  document.getElementById('t-leg-green').textContent=T('legGreen');
+  document.getElementById('t-leg-cloud').textContent=T('legCloud');
+  document.getElementById('t-src').textContent=T('src');
+  document.getElementById('t-pu-hum').textContent=T('puHum');
+  // tooltips
+  document.getElementById('tip-lst').textContent=T('tipLst');
+  document.getElementById('tip-ndvi').textContent=T('tipNdvi');
+  document.getElementById('tip-hum').textContent=T('tipHum');
+  document.getElementById('tip-score').textContent=T('tipScore');
+  document.getElementById('ptip-lst').textContent=T('tipMapLst');
+  document.getElementById('ptip-ndvi').textContent=T('tipNdvi');
+  document.getElementById('ptip-score').textContent=T('tipMapScore');
+  // rebuild dynamic parts
+  buildTimeTabs(); buildDistList(); updateCmp(); updateBadge();
+}
+
+function setLang(l){
+  LANG=l;
+  document.getElementById('lb-en').className='langbtn'+(l==='en'?' active':'');
+  document.getElementById('lb-it').className='langbtn'+(l==='it'?' active':'');
+  applyLang();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DISTRICTS + SUB-ZONES
+// ─────────────────────────────────────────────────────────────────────────────
+const DISTRICTS={
+  centro:        {lat:41.8986,lon:12.4768,label:'Centro Storico',  hB:0.82,gB:0.12,hM:2.8, humM:-8},
+  trastevere:    {lat:41.8896,lon:12.4700,label:'Trastevere',      hB:0.62,gB:0.28,hM:1.8, humM:-4},
+  parioli:       {lat:41.9188,lon:12.4886,label:'Parioli',         hB:0.38,gB:0.58,hM:-0.5,humM:5},
+  testaccio:     {lat:41.8780,lon:12.4762,label:'Testaccio',       hB:0.65,gB:0.24,hM:2.0, humM:-5},
+  eur:           {lat:41.8308,lon:12.4622,label:'EUR',             hB:0.48,gB:0.45,hM:0.5, humM:2},
+  garbatella:    {lat:41.8563,lon:12.4806,label:'Garbatella',      hB:0.52,gB:0.38,hM:0.9, humM:-2},
+  pigneto:       {lat:41.8872,lon:12.5292,label:'Pigneto',         hB:0.60,gB:0.30,hM:1.5, humM:-3},
+  villa_borghese:{lat:41.9139,lon:12.4921,label:'Villa Borghese',  hB:0.18,gB:0.82,hM:-3.2,humM:10},
+  tuscolano:     {lat:41.8653,lon:12.5192,label:'Tuscolano',       hB:0.55,gB:0.35,hM:1.1, humM:-2},
+  monte_mario:   {lat:41.9272,lon:12.4517,label:'Monte Mario',     hB:0.28,gB:0.68,hM:-2.0,humM:8},
+};
+
+// Sub-zones visible at zoom ≥ 14
+const SUBZONES=[
+  {lat:41.9009,lon:12.4833,label:'Fontana di Trevi', hB:0.90,gB:0.04,parentDid:'centro'},
+  {lat:41.9065,lon:12.4734,label:"Campo de' Fiori",  hB:0.80,gB:0.10,parentDid:'centro'},
+  {lat:41.8955,lon:12.4823,label:'Circo Massimo',    hB:0.68,gB:0.28,parentDid:'centro'},
+  {lat:41.9060,lon:12.4583,label:'Borgo/Vaticano',   hB:0.70,gB:0.18,parentDid:'centro'},
+  {lat:41.9060,lon:12.4980,label:'Rione Monti',      hB:0.75,gB:0.20,parentDid:'centro'},
+  {lat:41.9139,lon:12.4921,label:'Parco Borghese',   hB:0.10,gB:0.92,parentDid:'villa_borghese'},
+  {lat:41.9110,lon:12.4840,label:'Pincio',           hB:0.15,gB:0.80,parentDid:'villa_borghese'},
+  {lat:41.8290,lon:12.4690,label:'EUR Centro',       hB:0.55,gB:0.38,parentDid:'eur'},
+  {lat:41.8240,lon:12.4570,label:'Laghetto EUR',     hB:0.28,gB:0.68,parentDid:'eur'},
+  {lat:41.9210,lon:12.4920,label:'Parioli Nord',     hB:0.32,gB:0.62,parentDid:'parioli'},
+  {lat:41.8730,lon:12.4720,label:'Porto Fluviale',   hB:0.70,gB:0.18,parentDid:'testaccio'},
+  {lat:41.8820,lon:12.5320,label:'Torpignattara',    hB:0.63,gB:0.28,parentDid:'pigneto'},
+  {lat:41.9300,lon:12.4490,label:'Parco Monte Mario',hB:0.12,gB:0.88,parentDid:'monte_mario'},
+  {lat:41.8600,lon:12.4770,label:'Garbatella Centro',hB:0.50,gB:0.42,parentDid:'garbatella'},
+  {lat:41.8690,lon:12.5220,label:'Cinecittà',        hB:0.58,gB:0.32,parentDid:'tuscolano'},
+];
+
+let currentLayer='heat', selectedDid=null, distData={};
+let heatOvl=null, greenOvl=null, weatherData=null;
+let currentMode='today', currentHistMonth=0;
+const distMarkers={}, subMarkers=[];
+
+const HIST_MONTHS=[];
+const BASE=new Date(2023,6,1);
+for(let i=0;i<24;i++){const d=new Date(BASE);d.setMonth(d.getMonth()+i);HIST_MONTHS.push(d.toLocaleString('en-US',{month:'short',year:'numeric'}));}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MAP
+// ─────────────────────────────────────────────────────────────────────────────
+const map=L.map('map',{zoomControl:false,attributionControl:true}).setView([41.882,12.475],12);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',{maxZoom:19,attribution:'© CartoDB | Open-Meteo | Sentinel-2'}).addTo(map);
+L.control.zoom({position:'bottomleft'}).addTo(map);
+map.on('zoomend',()=>{ map.getZoom()>=14 ? showSubZones() : hideSubZones(); });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WEATHER
+// ─────────────────────────────────────────────────────────────────────────────
+async function fetchWeather(){
+  try{
+    const t=new Date(),p=new Date(t),f=new Date(t);
+    p.setDate(p.getDate()-5); f.setDate(f.getDate()+7);
+    const fmt=d=>d.toISOString().split('T')[0];
+    const url=`https://api.open-meteo.com/v1/forecast?latitude=41.89&longitude=12.48`+
+      `&hourly=relativehumidity_2m,surface_pressure,windspeed_10m,uv_index`+
+      `&daily=temperature_2m_max,temperature_2m_min,cloud_cover_mean,sunrise,sunset,uv_index_max`+
+      `&timezone=Europe%2FRome&start_date=${fmt(p)}&end_date=${fmt(f)}`;
+    const r=await fetch(url); weatherData=await r.json();
+  }catch(e){console.warn('Weather failed',e);}
+  fillOverview();
+}
+
+function fillOverview(){
+  const td=new Date().toISOString().split('T')[0];
+  const di=weatherData?weatherData.daily.time.indexOf(td):-1;
+  if(di>=0){
+    const w=weatherData.daily;
+    document.getElementById('ov-temp').textContent=`${w.temperature_2m_max[di].toFixed(0)}/${w.temperature_2m_min[di].toFixed(0)}°C`;
+    document.getElementById('ov-cloud').textContent=(w.cloud_cover_mean[di]||0).toFixed(0)+'%';
+    document.getElementById('ov-uv').textContent=(w.uv_index_max[di]||0).toFixed(1);
+    const sr=w.sunrise[di],ss=w.sunset[di];
+    document.getElementById('ov-rise').textContent=sr?sr.split('T')[1].slice(0,5):'–';
+    document.getElementById('ov-set').textContent=ss?ss.split('T')[1].slice(0,5):'–';
+    const hi=weatherData.hourly.time.findIndex(t=>t.startsWith(td+'T12'));
+    if(hi>=0){
+      document.getElementById('ov-hum').textContent=(weatherData.hourly.relativehumidity_2m[hi]||55)+'%';
+      document.getElementById('ov-pres').textContent=Math.round(weatherData.hourly.surface_pressure[hi]||1013);
+      document.getElementById('ov-wind').textContent=Math.round(weatherData.hourly.windspeed_10m[hi]||10);
+    }
+  } else {
+    document.getElementById('ov-temp').textContent='32/22°C';
+    document.getElementById('ov-hum').textContent='58%';
+    document.getElementById('ov-pres').textContent='1013';
+    document.getElementById('ov-uv').textContent='7.2';
+    document.getElementById('ov-cloud').textContent='25%';
+    document.getElementById('ov-wind').textContent='14';
+    document.getElementById('ov-rise').textContent='05:34';
+    document.getElementById('ov-set').textContent='20:41';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DATA GENERATION
+// ─────────────────────────────────────────────────────────────────────────────
+function mulberry32(s){return()=>{s|=0;s=s+0x6D2B79F5|0;let t=Math.imul(s^s>>>15,1|s);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function gauss(data,w,h,sig){const out=new Float32Array(data.length),r=Math.ceil(sig*2.5);for(let y=0;y<h;y++)for(let x=0;x<w;x++){let s=0,ws=0;for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){const nx=x+dx,ny=y+dy;if(nx<0||nx>=w||ny<0||ny>=h)continue;const g=Math.exp(-(dx*dx+dy*dy)/(2*sig*sig));s+=data[ny*w+nx]*g;ws+=g;}out[y*w+x]=s/ws;}return out;}
+
+function getWx(did,off){
+  const d=DISTRICTS[did]; if(!weatherData) return null;
+  const dt=new Date(); dt.setDate(dt.getDate()+off);
+  const ts=dt.toISOString().split('T')[0];
+  const i=weatherData.daily.time.indexOf(ts); if(i<0) return null;
+  const tmax=weatherData.daily.temperature_2m_max[i], tmin=weatherData.daily.temperature_2m_min[i];
+  const cloud=weatherData.daily.cloud_cover_mean[i]||20;
+  const hi=weatherData.hourly.time.findIndex(t=>t.startsWith(ts+'T12'));
+  const hum=hi>=0?weatherData.hourly.relativehumidity_2m[hi]:55;
+  const lst=+(( tmax*0.65+tmin*0.35 )+3.5+d.hM+(d.hM>0?(tmax*0.65+tmin*0.35)*0.04:(tmax*0.65+tmin*0.35)*0.02)).toFixed(1);
+  return{lst,tmax,tmin,cloud,humidity:Math.min(100,Math.max(10,Math.round((hum||55)+d.humM))),isReal:off<=0};
+}
+
+function genSynthetic(did,mIdx){
+  const d=DISTRICTS[did],month=mIdx%12;
+  const sH=0.3*Math.sin((month-1)*Math.PI/6),sG=-0.2*Math.sin((month-3)*Math.PI/6);
+  const seed=Math.abs(did.split('').reduce((a,c)=>a+c.charCodeAt(0)*31,0)+mIdx*997)%99991;
+  const rng=mulberry32(seed),G=24;
+  const rH=new Float32Array(G*G),rGn=new Float32Array(G*G),cl=new Uint8Array(G*G);
+  for(let i=0;i<G*G;i++){rH[i]=rng();rGn[i]=rng();cl[i]=rng()<0.13?1:0;}
+  const sH2=gauss(rH,G,G,3),sG2=gauss(rGn,G,G,3);
+  const hF=new Float32Array(G*G),gF=new Float32Array(G*G);
+  let sh=0,sg=0,sn=0,cnt=0;
+  for(let i=0;i<G*G;i++){
+    const h0=Math.min(1,Math.max(0,d.hB+sH+(sH2[i]-0.5)*0.22));
+    const g0=Math.min(1,Math.max(0,d.gB+sG+(sG2[i]-0.5)*0.22));
+    hF[i]=h0*0.72+(1-g0)*0.28;gF[i]=g0;
+    if(!cl[i]){sh+=hF[i];sg+=gF[i];sn+=gF[i]*2-1;cnt++;}
+  }
+  const mH=cnt?sh/cnt:0.5,mN=cnt?sn/cnt:0,cp=cl.reduce((a,b)=>a+b,0)/(G*G);
+  return{did,label:d.label,G,hF,gF,cl,mH,mN:+mN.toFixed(3),
+    lst:+(20+mH*25+sH*5).toFixed(1),
+    liv:+Math.min(100,Math.max(0,50+mN*25-mH*30+(1-cp)*5)).toFixed(1),
+    cp:+(cp*100).toFixed(1),source:'historical',tmax:null,tmin:null,
+    humidity:Math.round(55+mN*15+d.humM)};
+}
+
+function genWeather(did,off){
+  const d=DISTRICTS[did],wx=getWx(did,off);
+  const month=new Date().getMonth(),sG=-0.2*Math.sin((month-3)*Math.PI/6);
+  const seed=Math.abs(did.split('').reduce((a,c)=>a+c.charCodeAt(0)*31,0)+999)%99991;
+  const rng=mulberry32(seed),G=24;
+  const rH=new Float32Array(G*G),rGn=new Float32Array(G*G),cl=new Uint8Array(G*G);
+  for(let i=0;i<G*G;i++){rH[i]=rng();rGn[i]=rng();}
+  const cf=wx?wx.cloud/100:0.2;
+  for(let i=0;i<G*G;i++) cl[i]=rng()<cf*0.6?1:0;
+  const sG2=gauss(rGn,G,G,3);
+  const hF=new Float32Array(G*G),gF=new Float32Array(G*G);
+  const bL=wx?wx.lst:(20+d.hB*25),lN=Math.min(1,Math.max(0,(bL-15)/35));
+  let sh=0,sg=0,sn=0,cnt=0;
+  for(let i=0;i<G*G;i++){
+    const h0=Math.min(1,Math.max(0,lN+(rH[i]-0.5)*0.12+(d.hM/100)));
+    const g0=Math.min(1,Math.max(0,d.gB+sG+(sG2[i]-0.5)*0.18));
+    hF[i]=h0;gF[i]=g0;
+    if(!cl[i]){sh+=hF[i];sg+=gF[i];sn+=gF[i]*2-1;cnt++;}
+  }
+  const mH=cnt?sh/cnt:lN,mN=cnt?sn/cnt:0,cp=cl.reduce((a,b)=>a+b,0)/(G*G);
+  const src=wx?(wx.isReal?(off===0?'today':'recent'):'forecast'):'estimated';
+  return{did,label:d.label,G,hF,gF,cl,mH,mN:+mN.toFixed(3),
+    lst:wx?wx.lst:+(15+mH*30).toFixed(1),
+    liv:+Math.min(100,Math.max(0,50+mN*25-mH*30+(1-cp)*5)).toFixed(1),
+    cp:+(cp*100).toFixed(1),source:src,tmax:wx?wx.tmax:null,tmin:wx?wx.tmin:null,
+    humidity:wx?wx.humidity:Math.round(55+mN*15+d.humM)};
+}
+
+function buildAll(){
+  distData={};
+  if(currentMode==='hist') for(const did in DISTRICTS) distData[did]=genSynthetic(did,currentHistMonth);
+  else{
+    const offs={'today':0,'d-1':-1,'d-2':-2,'d-3':-3,'d-4':-4,'d-5':-5,'+1':1,'+3':3,'+7':7};
+    const off=offs[currentMode]??0;
+    for(const did in DISTRICTS) distData[did]=genWeather(did,off);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OVERLAYS
+// ─────────────────────────────────────────────────────────────────────────────
+function makeCanvas(type){
+  const W=200,H=200,cnv=document.createElement('canvas');cnv.width=W;cnv.height=H;
+  const ctx=cnv.getContext('2d');ctx.clearRect(0,0,W,H);
+  const R1=41.78,R2=41.96,C1=12.38,C2=12.58;
+  const ltY=lat=>H-(lat-R1)/(R2-R1)*H,lnX=lon=>(lon-C1)/(C2-C1)*W;
+  for(const did in distData){
+    const d=DISTRICTS[did],dd=distData[did],G=dd.G;
+    const la1=d.lat-0.013,la2=d.lat+0.013,lo1=d.lon-0.015,lo2=d.lon+0.015;
+    for(let gy=0;gy<G;gy++)for(let gx=0;gx<G;gx++){
+      const idx=(G-1-gy)*G+gx; if(dd.cl[idx]) continue;
+      const lat=la1+gy*(la2-la1)/G+(la2-la1)/(G*2);
+      const lon=lo1+gx*(lo2-lo1)/G+(lo2-lo1)/(G*2);
+      const px=lnX(lon),py=ltY(lat),R=type==='heat'?32:26;
+      const val=type==='heat'?dd.hF[idx]:dd.gF[idx];
+      const grd=ctx.createRadialGradient(px,py,0,px,py,R);
+      if(type==='heat'){
+        const a=val*0.7,r2=Math.round(220+val*35),g2=Math.round(100-val*80),b2=Math.round(80-val*60);
+        grd.addColorStop(0,`rgba(${r2},${g2},${b2},${a})`);
+        grd.addColorStop(0.5,`rgba(${r2},${Math.round(g2*1.3)},40,${a*0.5})`);
+        grd.addColorStop(1,'rgba(0,0,0,0)');
+      } else {
+        const g2=Math.round(100+val*130),a=val*0.62;
+        grd.addColorStop(0,`rgba(20,${g2},40,${a})`);
+        grd.addColorStop(1,'rgba(0,0,0,0)');
+      }
+      ctx.beginPath();ctx.fillStyle=grd;ctx.arc(px,py,R,0,Math.PI*2);ctx.fill();
+    }
+  }
+  const tmp=document.createElement('canvas');tmp.width=W;tmp.height=H;
+  const t2=tmp.getContext('2d');t2.filter='blur(7px)';t2.drawImage(cnv,0,0);t2.filter='none';
+  return tmp;
+}
+
+const ROME_BOUNDS=[[41.78,12.38],[41.96,12.58]];
+function renderOverlays(){
+  if(heatOvl){map.removeLayer(heatOvl);heatOvl=null;}
+  if(greenOvl){map.removeLayer(greenOvl);greenOvl=null;}
+  if(currentLayer==='heat'||currentLayer==='both') heatOvl=L.imageOverlay(makeCanvas('heat').toDataURL(),ROME_BOUNDS,{opacity:0.6,zIndex:400}).addTo(map);
+  if(currentLayer==='green'||currentLayer==='both') greenOvl=L.imageOverlay(makeCanvas('green').toDataURL(),ROME_BOUNDS,{opacity:0.46,zIndex:300}).addTo(map);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARKERS
+// ─────────────────────────────────────────────────────────────────────────────
+function markerHTML(label, lst, tmax, tmin, score, humidity, large){
+  const s=score, col=s>65?'#16a34a':s>40?'#d97706':'#dc2626', bg=s>65?'#f0fdf4':s>40?'#fffbeb':'#fef2f2';
+  const airTipText=T('tipMapLst');
+  const scoreTipText=T('tipMapScore');
+  const airLine=tmax!=null?`<div style="font-size:9px;color:#666;cursor:help" title="${airTipText}">${tmax.toFixed(0)}°/${tmin.toFixed(0)}°C</div>`:'';
+  const humLine=humidity!=null?`<div style="font-size:9px;color:#0ea5e9">${humidity}%</div>`:'';
+  const scoreLine=`<div style="font-size:10px;color:${col};font-weight:700;cursor:help" title="${scoreTipText}">${s.toFixed(0)}/100</div>`;
+  const sz=large?'min-width:80px':'min-width:66px;font-size:9px';
+  const lstSize=large?'13px':'11px';
+  return `<div style="background:${bg};border:1.5px solid ${col}55;border-radius:10px;padding:${large?'4px 8px':'3px 6px'};box-shadow:0 2px 8px rgba(0,0,0,0.11);text-align:center;cursor:pointer;${sz}">
+    <div style="font-size:${large?'10px':'9px'};font-weight:600;color:#1a1a1a;white-space:nowrap">${label}</div>
+    <div style="font-size:${lstSize};font-weight:700;color:#dc2626;cursor:help" title="${T('tipLst')}">${lst}°C LST</div>
+    ${airLine}${humLine}${scoreLine}
+  </div>`;
+}
+
+function renderMarkers(){
+  Object.values(distMarkers).forEach(m=>map.removeLayer(m));
+  for(const did in distData){
+    const dd=distData[did],d=DISTRICTS[did];
+    const icon=L.divIcon({className:'',html:markerHTML(dd.label,dd.lst,dd.tmax,dd.tmin,dd.liv,dd.humidity,true),iconSize:[88,66],iconAnchor:[44,66]});
+    const mk=L.marker([d.lat,d.lon],{icon}).addTo(map);
+    mk.on('click',()=>selectDistrict(did));
+    distMarkers[did]=mk;
+  }
+}
+
+function showSubZones(){
+  hideSubZones();
+  SUBZONES.forEach(z=>{
+    const parent=distData[z.parentDid];
+    const heatDelta=(z.hB-(DISTRICTS[z.parentDid]?.hB||0.5))*25;
+    const baseLst=parent?parent.lst:30;
+    const lst=+(baseLst+heatDelta).toFixed(1);
+    const ndvi=+(z.gB*2-1).toFixed(2);
+    const s=Math.round(Math.min(100,Math.max(0,50+ndvi*25-z.hB*30)));
+    const humidity=parent?Math.round(parent.humidity+(z.gB-0.5)*10):55;
+    const html=markerHTML(z.label,lst,null,null,s,humidity,false);
+    const icon=L.divIcon({className:'',html,iconSize:[72,46],iconAnchor:[36,46]});
+    const mk=L.marker([z.lat,z.lon],{icon,zIndexOffset:200}).addTo(map);
+    subMarkers.push(mk);
+  });
+}
+function hideSubZones(){subMarkers.forEach(m=>map.removeLayer(m));subMarkers.length=0;}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TIME TABS
+// ─────────────────────────────────────────────────────────────────────────────
+function fmtShort(d){return d.toLocaleDateString('en-GB',{day:'numeric',month:'short'});}
+function buildTimeTabs(){
+  const el=document.getElementById('time-tabs'); el.innerHTML='';
+  const today=new Date();
+  [
+    {mode:'d-5',label:fmtShort(new Date(today-5*86400000)),cls:'real'},
+    {mode:'d-4',label:fmtShort(new Date(today-4*86400000)),cls:'real'},
+    {mode:'d-3',label:fmtShort(new Date(today-3*86400000)),cls:'real'},
+    {mode:'d-2',label:fmtShort(new Date(today-2*86400000)),cls:'real'},
+    {mode:'d-1',label:fmtShort(new Date(today-1*86400000)),cls:'real'},
+    {mode:'today',label:T('today'),cls:'real'},
+    {mode:'+1',label:'+1d',cls:'fcast'},
+    {mode:'+3',label:'+3d',cls:'fcast'},
+    {mode:'+7',label:'+7d',cls:'fcast'},
+    {mode:'hist',label:T('history'),cls:''},
+  ].forEach(({mode,label,cls})=>{
+    const b=document.createElement('button');
+    b.className='ttab '+(cls?cls+' ':'')+(mode===currentMode?'active':'');
+    b.textContent=label; b.onclick=()=>switchMode(mode); el.appendChild(b);
+  });
+  document.getElementById('hist-wrap').style.display=currentMode==='hist'?'block':'none';
+  updateBadge();
+}
+
+function updateBadge(){
+  const el=document.getElementById('dbadge');
+  if(currentMode==='hist') el.innerHTML=`<span class="dbadge bhist">${T('badgeHist')}</span>`;
+  else if(currentMode==='today'||currentMode.startsWith('d-')) el.innerHTML=`<span class="dbadge blive">${T('badgeLive')}</span>`;
+  else el.innerHTML=`<span class="dbadge bfcast">${T('badgeFcast')}</span>`;
+}
+
+function switchMode(mode){
+  currentMode=mode; buildTimeTabs(); buildAll(); renderOverlays(); renderMarkers(); buildDistList(); updateCmp();
+  if(selectedDid) selectDistrict(selectedDid);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DISTRICT LIST
+// ─────────────────────────────────────────────────────────────────────────────
+function ndviLabel(n){ return n>0.6?T('ndviHigh'):n>0.3?T('ndviGood'):n>0.1?T('ndviMid'):T('ndviLow'); }
+function scoreLabel(s){ return s>75?T('scoreHigh'):s>55?T('scoreGood'):s>35?T('scoreMid'):T('scoreLow'); }
+
+function buildDistList(){
+  const el=document.getElementById('dist-list'); el.innerHTML='';
+  Object.entries(distData).sort((a,b)=>b[1].liv-a[1].liv).forEach(([did,dd])=>{
+    const s=dd.liv, cls=s>65?'dpl':s>40?'dpm':'dph';
+    const div=document.createElement('div'); div.className='dist-item'+(did===selectedDid?' sel':'');
+    const airStr=dd.tmax!=null?`${dd.tmax.toFixed(0)}°/${dd.tmin.toFixed(0)}°C · `:'';
+    div.innerHTML=`
+      <div>
+        <div class="dname">${dd.label}</div>
+        <div class="dmeta">${dd.lst}°C LST · NDVI ${dd.mN.toFixed(2)}</div>
+        <div class="dmeta">${airStr}${dd.humidity}% RH</div>
+      </div>
+      <div class="dpill ${cls}" title="${T('tipScore')}">${s.toFixed(0)}</div>`;
+    div.onclick=()=>{selectDistrict(did);map.flyTo([DISTRICTS[did].lat,DISTRICTS[did].lon],14,{duration:.8});};
+    el.appendChild(div);
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SELECT / POPUP
+// ─────────────────────────────────────────────────────────────────────────────
+function selectDistrict(did){
+  selectedDid=did; const dd=distData[did]; const s=dd.liv;
+  const col=s>65?'#16a34a':s>40?'#d97706':'#dc2626';
+  document.getElementById('popup').style.display='block';
+  document.getElementById('pu-name').textContent=dd.label;
+  document.getElementById('pu-lst').textContent=dd.lst+'°C';
+  document.getElementById('pu-lst-air').textContent=dd.tmax!=null?`Air ${dd.tmax.toFixed(0)}°/${dd.tmin.toFixed(0)}°C`:'';
+  document.getElementById('pu-ndvi').textContent=dd.mN.toFixed(2);
+  document.getElementById('pu-ndvi-hint').textContent=ndviLabel(dd.mN);
+  document.getElementById('pu-hum').textContent=(dd.humidity||'–')+'%';
+  document.getElementById('pu-score').textContent=s.toFixed(0)+'/100';
+  document.getElementById('pu-score-hint').textContent=scoreLabel(s);
+  document.getElementById('pu-bar').style.width=s+'%';
+  document.getElementById('pu-bar').style.background=col;
+  document.getElementById('pu-cloud').textContent=`Cloud-masked: ${dd.cp}% · hover values for explanations`;
+  buildDistList();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SELECTS + COMPARE
+// ─────────────────────────────────────────────────────────────────────────────
+function populateSelects(){
+  const ids=Object.keys(DISTRICTS);
+  ['ca','cb','al-d'].forEach(sid=>{
+    const s=document.getElementById(sid); s.innerHTML=sid==='al-d'?`<option value="">${T('alPh')}</option>`:'';
+    ids.forEach(did=>{const o=document.createElement('option');o.value=did;o.textContent=DISTRICTS[did].label;s.appendChild(o);});
+  });
+  document.getElementById('ca').value='centro';
+  document.getElementById('cb').value='villa_borghese';
+}
+
+function updateCmp(){
+  const a=document.getElementById('ca').value,b=document.getElementById('cb').value; if(!a||!b) return;
+  const da=distData[a]||genWeather(a,0), db=distData[b]||genWeather(b,0);
+  document.getElementById('cmp-grid').innerHTML=`
+    <div class="cmp-cell"><div class="cmp-nm">${da.label}</div>
+      <div class="cmp-v" style="color:#dc2626">${da.lst}</div><div class="cmp-u">°C LST</div>
+      <div class="cmp-v" style="font-size:13px;margin-top:2px;color:#16a34a">${da.mN.toFixed(2)}</div><div class="cmp-u">NDVI</div>
+      <div class="cmp-v" style="font-size:13px;margin-top:2px;color:#0ea5e9">${da.humidity||'–'}%</div><div class="cmp-u">RH</div>
+      <div class="cmp-v" style="font-size:13px;margin-top:2px;color:#7c3aed">${da.liv.toFixed(0)}</div><div class="cmp-u">score</div>
+    </div>
+    <div class="cmp-cell"><div class="cmp-nm">${db.label}</div>
+      <div class="cmp-v" style="color:#dc2626">${db.lst}</div><div class="cmp-u">°C LST</div>
+      <div class="cmp-v" style="font-size:13px;margin-top:2px;color:#16a34a">${db.mN.toFixed(2)}</div><div class="cmp-u">NDVI</div>
+      <div class="cmp-v" style="font-size:13px;margin-top:2px;color:#0ea5e9">${db.humidity||'–'}%</div><div class="cmp-u">RH</div>
+      <div class="cmp-v" style="font-size:13px;margin-top:2px;color:#7c3aed">${db.liv.toFixed(0)}</div><div class="cmp-u">score</div>
+    </div>`;
+  const dL=+(da.lst-db.lst).toFixed(1), dS=+(da.liv-db.liv).toFixed(1);
+  const lbg=Math.abs(dL)<1?'#f3f4f6':dL>0?'#fee2e2':'#dbeafe', ltx=Math.abs(dL)<1?'#6b7280':dL>0?'#dc2626':'#2563eb';
+  const sbg=Math.abs(dS)<3?'#f3f4f6':dS>0?'#dcfce7':'#fef3c7', stx=Math.abs(dS)<3?'#6b7280':dS>0?'#15803d':'#b45309';
+  document.getElementById('dchips').innerHTML=`
+    <div class="dchip" style="background:${lbg};color:${ltx}">Δ LST ${dL>0?'+':''}${dL}°C</div>
+    <div class="dchip" style="background:${sbg};color:${stx}">Δ Score ${dS>0?'+':''}${dS}</div>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ALERTS
+// ─────────────────────────────────────────────────────────────────────────────
+function doAlert(){
+  const dist=document.getElementById('al-d').value, email=document.getElementById('al-email').value;
+  const msg=document.getElementById('amsg');
+  if(!dist||!email){msg.style.display='block';msg.style.background='#fee2e2';msg.style.color='#dc2626';msg.textContent=T('alFill');return;}
+  const dd=distData[dist]||genWeather(dist,0);
+  const alerts=[];
+  if(dd.lst>+document.getElementById('al-lst').value) alerts.push(`LST ${dd.lst}°C`);
+  if(dd.mN<+document.getElementById('al-ndvi').value) alerts.push(`NDVI ${dd.mN.toFixed(2)}`);
+  msg.style.display='block';
+  if(alerts.length){msg.style.background='#fef3c7';msg.style.color='#b45309';msg.textContent=T('alActive')+alerts.join(', ');}
+  else{msg.style.background='#dcfce7';msg.style.color='#15803d';msg.textContent=T('alOk')+dd.liv+'/100';}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LAYER + SLIDERS
+// ─────────────────────────────────────────────────────────────────────────────
+function setLayer(l){
+  currentLayer=l;
+  document.getElementById('b-heat').className='lpill'+(l==='heat'?' ah':'');
+  document.getElementById('b-green').className='lpill'+(l==='green'?' ag':'');
+  document.getElementById('b-both').className='lpill'+(l==='both'?' ab':'');
+  renderOverlays();
+}
+
+document.getElementById('hslider').addEventListener('input',function(){
+  currentHistMonth=+this.value;
+  document.getElementById('hist-lbl').textContent=HIST_MONTHS[currentHistMonth];
+  buildAll();renderOverlays();renderMarkers();buildDistList();updateCmp();
+  if(selectedDid) selectDistrict(selectedDid);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INIT
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Real Backend API Layer ────────────────────────────────────────────────────
+// Set to your Railway URL after deployment, e.g.:
+// const API_BASE = 'https://rome-climate-api.up.railway.app/api/v1';
+const API_BASE = '';  // empty = API not deployed yet → use local data
+
+let apiOverviewCache = {};   // date string → overview response
+let useApiData = false;      // flips to true once API responds successfully
+let lastApiSource = null;    // 'sentinel2+open-meteo' | 'open-meteo+uhi-model'
+
+async function fetchFromApi(date) {
+  if (!API_BASE) return null;
+  try {
+    const url = `${API_BASE}/climate/overview?target_date=${date}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    lastApiSource = data.data_source || null;
+    return data;
+  } catch(e) {
+    console.warn('API unavailable, using local data:', e.message);
+    return null;
+  }
+}
+
+function applyApiOverview(apiData) {
+  // Populate Rome overview card from API
+  if (!apiData) return;
+  const el = id => document.getElementById(id);
+  if (el('ov-temp') && apiData.tmax_celsius != null) {
+    el('ov-temp').textContent = `${apiData.tmax_celsius.toFixed(0)}/${apiData.tmin_celsius.toFixed(0)}°C`;
+  }
+  if (el('ov-hum') && apiData.humidity_pct != null) {
+    el('ov-hum').textContent = apiData.humidity_pct.toFixed(0) + '%';
+  }
+  if (el('ov-pres') && apiData.pressure_hpa != null) {
+    el('ov-pres').textContent = Math.round(apiData.pressure_hpa);
+  }
+  if (el('ov-uv') && apiData.uv_index != null) {
+    el('ov-uv').textContent = apiData.uv_index.toFixed(1);
+  }
+  if (el('ov-cloud') && apiData.cloud_pct != null) {
+    el('ov-cloud').textContent = apiData.cloud_pct.toFixed(0) + '%';
+  }
+  if (el('ov-wind') && apiData.wind_kmh != null) {
+    el('ov-wind').textContent = Math.round(apiData.wind_kmh);
+  }
+  if (el('ov-rise') && apiData.sunrise) el('ov-rise').textContent = apiData.sunrise;
+  if (el('ov-set')  && apiData.sunset)  el('ov-set').textContent  = apiData.sunset;
+
+  // Show data source badge
+  const srcEl = document.getElementById('src-note');
+  if (srcEl && lastApiSource) {
+    const isSatellite = lastApiSource.includes('sentinel2');
+    srcEl.textContent = isSatellite
+      ? 'Sentinel-2 NDVI + LST (real satellite data)'
+      : 'Open-Meteo + UHI model (satellite unavailable)';
+    srcEl.style.color = isSatellite ? '#15803d' : '#b45309';
+  }
+
+  // Merge API district data into local distData
+  if (apiData.districts && Array.isArray(apiData.districts)) {
+    apiData.districts.forEach(d => {
+      if (distData[d.id]) {
+        distData[d.id].lst = d.mean_lst_celsius;
+        distData[d.id].mN  = d.mean_ndvi;
+        distData[d.id].humidity = d.humidity_pct;
+        distData[d.id].liv = d.livability_score;
+        distData[d.id].dataSource = d.data_source;
+      }
+    });
+  }
+}
+
+async function tryLoadApiData(dateStr) {
+  if (!API_BASE) return false;
+  if (apiOverviewCache[dateStr]) {
+    applyApiOverview(apiOverviewCache[dateStr]);
+    return true;
+  }
+  const data = await fetchFromApi(dateStr);
+  if (data) {
+    apiOverviewCache[dateStr] = data;
+    applyApiOverview(data);
+    useApiData = true;
+    return true;
+  }
+  return false;
+}
+
+function getApiDateStr(mode, histMonth) {
+  const today = new Date();
+  const offsets = {'today':0,'d-1':-1,'d-2':-2,'d-3':-3,'d-4':-4,'d-5':-5,'+1':1,'+3':3,'+7':7};
+  if (mode === 'hist') {
+    // For history, use the 15th of the HIST_MONTHS month
+    const BASE = new Date(2023,6,1);
+    BASE.setMonth(BASE.getMonth() + histMonth);
+    BASE.setDate(15);
+    return BASE.toISOString().split('T')[0];
+  }
+  const off = offsets[mode] || 0;
+  const d = new Date(today);
+  d.setDate(d.getDate() + off);
+  return d.toISOString().split('T')[0];
+}
+// ─────────────────────────────────────────────────────────────────────────────
+async function init(){
+  populateSelects();
+  applyLang();
+
+  // Load weather (always — provides fallback data)
+  await fetchWeather();
+  buildAll();
+  renderOverlays();
+  renderMarkers();
+  buildDistList();
+  updateCmp();
+
+  // Try to enrich with real backend API (non-blocking)
+  const dateStr = getApiDateStr(currentMode, currentHistMonth);
+  const apiOk = await tryLoadApiData(dateStr);
+  if (apiOk) {
+    // Re-render with API-enriched data
+    renderMarkers();
+    buildDistList();
+    updateCmp();
+  }
+}
+init();
+</script>
+</body>
+</html>

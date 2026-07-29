@@ -1,0 +1,10 @@
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+log_cli = true
+log_cli_level = "WARNING"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
