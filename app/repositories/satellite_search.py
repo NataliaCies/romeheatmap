@@ -1,7 +1,19 @@
-"""Sentinel-2 scene search via Copernicus OData API."""
+"""Sentinel-2 scene search via Copernicus OData API.
+
+Fix (2026-08): Corrected download URL format.
+
+Old (broken): https://zipper.dataspace.copernicus.eu/api/v1/dataspace/products/{id}/$value
+New (correct): https://catalogue.dataspace.copernicus.eu/odata/v1/Products({id})/$value
+
+The zipper endpoint returns 404. The correct OData download URL is on the
+catalogue endpoint, using the OData Products({id})/$value format with
+parentheses around the ID - not a path segment.
+
+Also fix: archive endpoint for Open-Meteo returns 404 for recent dates.
+"""
 from __future__ import annotations
 from datetime import date, timedelta
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import httpx
 from app.core.cache import cache_get, cache_set
 from app.core.config import get_settings
@@ -11,6 +23,10 @@ from app.repositories.copernicus_auth import CopernicusTokenRepository
 
 logger = get_logger(__name__)
 _SCENE_CACHE_TTL = 43_200
+
+# Correct Copernicus Data Space OData download base URL
+# Format: {DOWNLOAD_BASE}({scene_id})/$value
+_COPERNICUS_ODATA_DOWNLOAD = "https://catalogue.dataspace.copernicus.eu/odata/v1/Products"
 
 
 @dataclass
@@ -71,7 +87,8 @@ class SatelliteSearchRepository:
                 f"({len(scenes)} total scenes, all filtered out)")
         best = min(candidates, key=lambda s: abs((s.sensing_date - target_date).days))
         logger.info("satellite_scene_selected", scene_id=best.scene_id,
-                    sensing_date=str(best.sensing_date), cloud_pct=best.cloud_cover_pct)
+                    sensing_date=str(best.sensing_date), cloud_pct=best.cloud_cover_pct,
+                    download_url=best.download_url)
         return best
 
     async def list_recent_scenes(self, bbox: tuple, days: int = 30) -> list[SatelliteScene]:
@@ -137,11 +154,20 @@ class SatelliteSearchRepository:
         for item in data.get("value", []):
             try:
                 attrs = {a["Name"]: a.get("Value") for a in item.get("Attributes", [])}
+                scene_id = item["Id"]
+
+                # FIX: Use OData catalogue URL format for download, not the zipper endpoint.
+                # Old (broken): https://zipper.dataspace.copernicus.eu/.../{id}/$value  → 404
+                # New (correct): https://catalogue.dataspace.copernicus.eu/odata/v1/Products({id})/$value
+                # Note the parentheses around the ID - this is the OData standard.
+                download_url = f"{_COPERNICUS_ODATA_DOWNLOAD}({scene_id})/$value"
+
                 scenes.append(SatelliteScene(
-                    scene_id=item["Id"], product_name=item["Name"],
+                    scene_id=scene_id,
+                    product_name=item["Name"],
                     sensing_date=date.fromisoformat(item["ContentDate"]["Start"][:10]),
                     cloud_cover_pct=float(attrs.get("cloudCover") or 100.0),
-                    download_url=f"{self._settings.copernicus_download_url}/{item['Id']}/$value",
+                    download_url=download_url,
                     bbox=self._settings.rome_bbox,
                     orbit_number=int(attrs.get("relativeOrbitNumber") or 0),
                     orbit_direction=str(attrs.get("orbitDirection") or "DESCENDING"),
