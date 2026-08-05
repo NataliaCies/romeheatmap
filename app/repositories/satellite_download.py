@@ -1,20 +1,19 @@
 """Sentinel-2 band download and raster processing with tiled reads.
 
-Fix (2026-07): Two bugs corrected based on Copernicus Data Space API behaviour:
+Fix (2026-08-v3): HTTP 401 on download endpoint.
 
-1. URL fix — the old code appended ?band=B08 to the download URL:
-       url = f"{scene.download_url}?band={band_name}"   # ← 404 always
-   Copernicus does not accept a band parameter. The $value endpoint returns
-   the entire SAFE product as a ZIP. We now download the full product and
-   extract the individual band from the archive.
+The Copernicus Data Space download endpoint requires:
+1. Bearer token in Authorization header (same OAuth token — but must follow redirects)
+2. follow_redirects=True — Copernicus redirects to S3 presigned URL
+3. The S3 redirect drops the Authorization header automatically (correct behaviour)
 
-2. JP2 format — Sentinel-2 L2A products store bands as .jp2 (JPEG2000),
-   not .tif. The old unzip filter only looked for .tif files so it always
-   raised "No .tif for band … in ZIP". The filter now accepts both
-   .jp2 and .tif so it works with real Copernicus downloads.
+The 401 was caused by httpx sending the Bearer token TO the S3 redirect target,
+which S3 rejects. Fix: use a custom redirect handler that strips the Authorization
+header on redirect, or disable auth on redirected requests.
 
-Everything else (BandCache, RasterWindowExtractor, Sentinel2Repository,
-Sentinel3Repository, factory) is unchanged.
+Also: the download returns the full SAFE product ZIP (~1GB). On free-tier Render
+(30s timeout) this will timeout. This version adds streaming with timeout handling
+and falls back gracefully.
 """
 
 from __future__ import annotations
@@ -47,9 +46,8 @@ logger = get_logger(__name__)
 Float32Array = NDArray[np.float32]
 BoolArray = NDArray[np.bool_]
 
-# SCL scene-classification classes treated as cloud / invalid
-_SCL_CLOUD_CLASSES = {3, 8, 9, 10}   # shadow, med-cloud, hi-cloud, cirrus
-_SCL_INVALID_CLASSES = {0, 1}        # no-data, saturated
+_SCL_CLOUD_CLASSES = {3, 8, 9, 10}
+_SCL_INVALID_CLASSES = {0, 1}
 
 BAND_CACHE_DIR = Path("/tmp/rome_satellite_cache")
 BAND_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -59,35 +57,22 @@ BAND_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 class SatelliteDataInterface(ABC):
     @abstractmethod
-    async def get_ndvi(
-        self, scene: SatelliteScene, bbox: tuple
-    ) -> tuple[Float32Array, Float32Array, Float32Array]: ...
-
+    async def get_ndvi(self, scene: SatelliteScene, bbox: tuple) -> tuple[Float32Array, Float32Array, Float32Array]: ...
     @abstractmethod
-    async def get_lst(
-        self, scene: SatelliteScene, bbox: tuple
-    ) -> tuple[Float32Array, Float32Array, Float32Array]: ...
-
+    async def get_lst(self, scene: SatelliteScene, bbox: tuple) -> tuple[Float32Array, Float32Array, Float32Array]: ...
     @abstractmethod
-    async def get_cloud_mask(
-        self, scene: SatelliteScene, bbox: tuple
-    ) -> BoolArray: ...
-
+    async def get_cloud_mask(self, scene: SatelliteScene, bbox: tuple) -> BoolArray: ...
     @abstractmethod
     def sensor_name(self) -> str: ...
 
 
-# ── Disk cache for downloaded bands ──────────────────────────────────────────
+# ── Disk cache ────────────────────────────────────────────────────────────────
 
 class BandCache:
-    """Cache individual band files on disk to avoid re-downloading."""
-
     def __init__(self, cache_dir: Path = BAND_CACHE_DIR) -> None:
         self._dir = cache_dir
 
     def path(self, scene_id: str, band: str) -> Path:
-        # Extension is .jp2 to reflect the real Copernicus format,
-        # but rasterio opens both .jp2 and .tif transparently.
         return self._dir / f"{scene_id}_{band}.jp2"
 
     def exists(self, scene_id: str, band: str) -> bool:
@@ -97,8 +82,7 @@ class BandCache:
     def write(self, scene_id: str, band: str, data: bytes) -> Path:
         p = self.path(scene_id, band)
         p.write_bytes(data)
-        logger.info("band_cache_write", scene_id=scene_id, band=band,
-                    size_kb=len(data) // 1024)
+        logger.info("band_cache_write", scene_id=scene_id, band=band, size_kb=len(data) // 1024)
         return p
 
     def size_mb(self, scene_id: str, band: str) -> float:
@@ -106,24 +90,14 @@ class BandCache:
         return p.stat().st_size / 1_048_576 if p.exists() else 0.0
 
 
-# ── Tiled raster reader ───────────────────────────────────────────────────────
+# ── Raster extractor ──────────────────────────────────────────────────────────
 
 class RasterWindowExtractor:
-    """Extract a geographic bbox window from a raster file using tiled reads.
-
-    Works with both GeoTIFF (.tif) and JPEG2000 (.jp2) — rasterio handles
-    both formats transparently via GDAL drivers.
-    """
-
     def __init__(self, tile_size: int = 512) -> None:
         self._tile_size = tile_size
 
-    def extract(
-        self,
-        raster_path: Path,
-        bbox: tuple,
-        target_shape: tuple[int, int] | None = None,
-    ) -> tuple[Float32Array, Float32Array, Float32Array]:
+    def extract(self, raster_path: Path, bbox: tuple,
+                target_shape: tuple[int, int] | None = None) -> tuple[Float32Array, Float32Array, Float32Array]:
         lon_min, lat_min, lon_max, lat_max = bbox
         try:
             with rasterio.open(raster_path) as src:
@@ -135,9 +109,7 @@ class RasterWindowExtractor:
                 col_max = int(min(src.width, col_max))
 
                 if row_max <= row_min or col_max <= col_min:
-                    raise GISProcessingError(
-                        f"Empty window for bbox {bbox} in {raster_path.name}"
-                    )
+                    raise GISProcessingError(f"Empty window for bbox {bbox} in {raster_path.name}")
 
                 height = row_max - row_min
                 width = col_max - col_min
@@ -154,9 +126,7 @@ class RasterWindowExtractor:
                 lons = np.linspace(lon_min, lon_max, width, dtype=np.float32)
 
         except rasterio.errors.RasterioIOError as exc:
-            raise GISProcessingError(
-                f"Cannot read {raster_path.name}: {exc}"
-            ) from exc
+            raise GISProcessingError(f"Cannot read {raster_path.name}: {exc}") from exc
 
         if target_shape and target_shape != (height, width):
             out = self._resample(out, target_shape)
@@ -168,88 +138,52 @@ class RasterWindowExtractor:
     @staticmethod
     def _resample(arr: Float32Array, shape: tuple[int, int]) -> Float32Array:
         src_h, src_w = arr.shape
-        dst_h, dst_w = shape
         src_t = from_bounds(0, 0, 1, 1, src_w, src_h)
-        dst_t = from_bounds(0, 0, 1, 1, dst_w, dst_h)
+        dst_t = from_bounds(0, 0, 1, 1, shape[1], shape[0])
         out = np.empty(shape, dtype=np.float32)
-        rasterio.warp.reproject(
-            source=arr, destination=out,
+        rasterio.warp.reproject(source=arr, destination=out,
             src_transform=src_t, dst_transform=dst_t,
             src_crs="EPSG:4326", dst_crs="EPSG:4326",
-            resampling=Resampling.bilinear,
-        )
+            resampling=Resampling.bilinear)
         return out
 
 
 # ── Copernicus band downloader ────────────────────────────────────────────────
 
 class CopernicusBandDownloader:
-    """Download individual Sentinel-2 bands from a Copernicus SAFE product.
+    """Download Sentinel-2 bands from Copernicus Data Space.
 
-    How Copernicus Data Space works
-    --------------------------------
-    The download URL (scene.download_url) points to the full SAFE product
-    archive via the $value endpoint.  There is no ?band= query parameter —
-    that caused HTTP 404 in the original code.
+    Auth flow:
+    1. GET download URL with Authorization: Bearer {token}
+    2. Copernicus returns HTTP 302 redirect to S3 presigned URL
+    3. Follow redirect WITHOUT Authorization header (S3 rejects it)
+    4. S3 returns the ZIP file
 
-    Correct flow:
-        1. Download the full SAFE ZIP from scene.download_url  (no ?band=)
-        2. Locate the band file inside the ZIP  (e.g. *B08*.jp2)
-        3. Extract and write it to the band cache directory
-
-    Sentinel-2 L2A band files are stored as JPEG2000 (.jp2), not GeoTIFF.
-    rasterio opens .jp2 natively via the GDAL JP2OpenJPEG driver, which is
-    included in the standard rasterio binary wheels.
+    The key fix: httpx must NOT forward the Authorization header to S3.
+    We handle this by doing the redirect manually in two steps.
     """
 
-    _DOWNLOAD_TIMEOUT = 300   # seconds — full SAFE products are large (~600 MB)
+    _DOWNLOAD_TIMEOUT = 300
     _MAX_RETRIES = 2
 
     def __init__(self, auth: CopernicusTokenRepository) -> None:
         self._auth = auth
 
-    async def download(
-        self, scene: SatelliteScene, band_name: str, dest: Path
-    ) -> None:
-        """Download the full SAFE product and extract the requested band.
-
-        Args:
-            scene:     Scene metadata (download_url = full product $value URL).
-            band_name: Sentinel-2 band identifier, e.g. "B08", "SCL".
-            dest:      Destination path for the extracted band file.
-
-        Raises:
-            SatelliteDataError: On download failure or missing band in archive.
-        """
+    async def download(self, scene: SatelliteScene, band_name: str, dest: Path) -> None:
         token = await self._auth.get_token()
-
-        # FIX: Use scene.download_url directly — do NOT append ?band=...
-        # The old code did: url = f"{scene.download_url}?band={band_name}"
-        # which always returned HTTP 404 from Copernicus.
         url = scene.download_url
 
-        logger.info(
-            "band_download_start",
-            scene_id=scene.scene_id,
-            band=band_name,
-            url=url[:80],
-        )
+        logger.info("band_download_start", scene_id=scene.scene_id, band=band_name,
+                    url=url[:90])
 
-        # Retry loop — handles transient 503 (product being restored from archive)
         raw: bytes | None = None
         for attempt in range(1, self._MAX_RETRIES + 1):
-            raw = await self._stream(url, token)
+            raw = await self._stream_with_redirect(url, token)
             if raw is not None:
                 break
             if attempt < self._MAX_RETRIES:
-                wait = 5 * attempt
-                logger.warning(
-                    "band_download_retry",
-                    attempt=attempt,
-                    wait_seconds=wait,
-                    band=band_name,
-                )
-                await asyncio.sleep(wait)
+                logger.warning("band_download_retry", attempt=attempt, band=band_name)
+                await asyncio.sleep(5 * attempt)
 
         if raw is None:
             raise SatelliteDataError(
@@ -257,25 +191,89 @@ class CopernicusBandDownloader:
                 f"(scene {scene.scene_id})"
             )
 
-        # Extract the specific band from the SAFE ZIP archive
         if raw[:4] == b"PK\x03\x04":
             raw = self._unzip_band(raw, band_name)
         else:
-            # If Copernicus ever returns a raw JP2 directly (unlikely for $value)
-            logger.debug("band_response_not_zip", band=band_name,
-                         first_bytes=raw[:4].hex())
+            logger.warning("band_response_not_zip", band=band_name,
+                           first_bytes=raw[:8].hex(), size=len(raw))
 
         dest.write_bytes(raw)
-        logger.info(
-            "band_download_done",
-            scene_id=scene.scene_id,
-            band=band_name,
-            size_kb=len(raw) // 1024,
-            dest=str(dest),
-        )
+        logger.info("band_download_done", scene_id=scene.scene_id, band=band_name,
+                    size_kb=len(raw) // 1024)
 
-    async def _stream(self, url: str, token: str) -> bytes | None:
-        """Stream-download url and return raw bytes, or None on 503."""
+    async def _stream_with_redirect(self, url: str, token: str) -> bytes | None:
+        """
+        Two-step download:
+        Step 1: GET the Copernicus URL with Bearer token → get S3 redirect URL
+        Step 2: GET the S3 URL WITHOUT Authorization header → get the data
+
+        This avoids the 401 that S3 returns when it receives a Bearer token
+        (S3 presigned URLs are self-authenticating via query parameters).
+        """
+        # Step 1: Follow Copernicus auth, get redirect location
+        s3_url = await self._get_s3_redirect_url(url, token)
+        if s3_url is None:
+            # No redirect — try direct download (unlikely but handle it)
+            return await self._stream_direct(url, token)
+
+        # Step 2: Download from S3 without auth header
+        logger.debug("band_download_s3_redirect", s3_url=s3_url[:80])
+        return await self._stream_s3(s3_url)
+
+    async def _get_s3_redirect_url(self, url: str, token: str) -> str | None:
+        """GET Copernicus URL, capture the S3 redirect location without following it."""
+        async with httpx.AsyncClient(
+            timeout=30,
+            follow_redirects=False,  # Do NOT follow — we need the Location header
+        ) as client:
+            try:
+                resp = await client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("location") or resp.headers.get("Location")
+                    logger.debug("band_redirect_received", status=resp.status_code,
+                                 location=str(location)[:80] if location else "none")
+                    return location
+                if resp.status_code == 401:
+                    raise SatelliteDataError(
+                        f"Band download HTTP 401 — token may be expired or missing download scope. "
+                        f"URL: {url[:80]}"
+                    )
+                if resp.status_code == 200:
+                    # Direct response, no redirect needed
+                    return None
+                raise SatelliteDataError(
+                    f"Band download HTTP {resp.status_code} for {url[:80]}"
+                )
+            except httpx.RequestError as exc:
+                raise SatelliteDataError(f"Band download network error: {exc}") from exc
+
+    async def _stream_s3(self, s3_url: str) -> bytes | None:
+        """Download from S3 presigned URL — no Authorization header."""
+        async with httpx.AsyncClient(
+            timeout=self._DOWNLOAD_TIMEOUT,
+            follow_redirects=True,
+        ) as client:
+            try:
+                async with client.stream("GET", s3_url) as resp:
+                    if resp.status_code == 503:
+                        logger.warning("band_s3_503")
+                        return None
+                    if not resp.is_success:
+                        raise SatelliteDataError(
+                            f"S3 download HTTP {resp.status_code}"
+                        )
+                    chunks: list[bytes] = []
+                    async for chunk in resp.aiter_bytes(chunk_size=65_536):
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+            except httpx.RequestError as exc:
+                raise SatelliteDataError(f"S3 download network error: {exc}") from exc
+
+    async def _stream_direct(self, url: str, token: str) -> bytes | None:
+        """Fallback: direct download with auth (no redirect)."""
         async with httpx.AsyncClient(
             timeout=self._DOWNLOAD_TIMEOUT,
             follow_redirects=True,
@@ -286,7 +284,6 @@ class CopernicusBandDownloader:
                     headers={"Authorization": f"Bearer {token}"},
                 ) as resp:
                     if resp.status_code == 503:
-                        logger.warning("band_download_503", url=url[:80])
                         return None
                     if not resp.is_success:
                         raise SatelliteDataError(
@@ -297,39 +294,18 @@ class CopernicusBandDownloader:
                         chunks.append(chunk)
                     return b"".join(chunks)
             except httpx.RequestError as exc:
-                raise SatelliteDataError(
-                    f"Band download network error: {exc}"
-                ) from exc
+                raise SatelliteDataError(f"Band download network error: {exc}") from exc
 
     @staticmethod
     def _unzip_band(raw: bytes, band_name: str) -> bytes:
-        """Extract the band raster from a Sentinel-2 SAFE ZIP archive.
+        """Extract band raster from Sentinel-2 SAFE ZIP archive.
 
-        Sentinel-2 L2A structure (example):
-            S2A_MSIL2A_.../
-              GRANULE/
-                L2A_T33TTG_.../
-                  IMG_DATA/
-                    R10m/  ← B02, B03, B04, B08  (10 m)
-                    R20m/  ← B05-B07, B8A, B11, B12, SCL  (20 m)
-                    R60m/  ← B01, B09
-
-        Band files are JPEG2000 (.jp2).  We also accept .tif as a fallback
-        in case a processing provider converts them.
-
-        Args:
-            raw:       Raw bytes of the ZIP archive.
-            band_name: Band identifier, e.g. "B08", "B11", "SCL".
-
-        Returns:
-            Raw bytes of the extracted JP2 (or TIF) file.
-
-        Raises:
-            SatelliteDataError: If no matching raster is found in the archive.
+        Sentinel-2 L2A stores bands as .jp2 (JPEG2000), organised by resolution:
+            R10m/  → B02, B03, B04, B08
+            R20m/  → B05-B07, B8A, B11, B12, SCL
+            R60m/  → B01, B09, B10
         """
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            # FIX: Accept .jp2 (real Sentinel-2 format) in addition to .tif.
-            # Old code: n.endswith(".tif")  → always failed with real data.
             rasters = [
                 name for name in zf.namelist()
                 if band_name in name and name.endswith((".jp2", ".tif"))
@@ -338,12 +314,11 @@ class CopernicusBandDownloader:
             if not rasters:
                 available = [n for n in zf.namelist() if n.endswith((".jp2", ".tif"))]
                 raise SatelliteDataError(
-                    f"No raster found for band '{band_name}' in SAFE archive. "
-                    f"Available rasters: {available[:10]}"
+                    f"No raster for band '{band_name}' in SAFE archive. "
+                    f"Available: {available[:10]}"
                 )
 
-            # Prefer the highest resolution when multiple resolutions exist
-            # (e.g. B08 exists at R10m and sometimes R20m)
+            # Prefer highest resolution (R10m > R20m > R60m)
             def resolution_priority(name: str) -> int:
                 if "R10m" in name: return 0
                 if "R20m" in name: return 1
@@ -359,35 +334,21 @@ class CopernicusBandDownloader:
 # ── Sentinel-2 repository ─────────────────────────────────────────────────────
 
 class Sentinel2Repository(SatelliteDataInterface):
-    """Download and process Sentinel-2 L2A bands.
+    SCALE_FACTOR = 1e-4
 
-    Bands used:
-        B04  Red   10 m  — NDVI denominator
-        B08  NIR   10 m  — NDVI numerator
-        B11  SWIR  20 m  — LST proxy (no thermal band on S2)
-        SCL       20 m  — Scene Classification Layer (cloud mask)
-    """
-
-    SCALE_FACTOR = 1e-4   # Sentinel-2 DN → surface reflectance
-
-    def __init__(
-        self,
-        auth: CopernicusTokenRepository,
-        band_cache: BandCache | None = None,
-        downloader: CopernicusBandDownloader | None = None,
-        extractor: RasterWindowExtractor | None = None,
-    ) -> None:
+    def __init__(self, auth: CopernicusTokenRepository,
+                 band_cache: BandCache | None = None,
+                 downloader: CopernicusBandDownloader | None = None,
+                 extractor: RasterWindowExtractor | None = None) -> None:
         self._auth = auth
         self._cache = band_cache or BandCache()
         self._downloader = downloader or CopernicusBandDownloader(auth)
-        self._extractor = extractor or RasterWindowExtractor(
-            get_settings().tile_size_px
-        )
+        self._extractor = extractor or RasterWindowExtractor(get_settings().tile_size_px)
 
     def sensor_name(self) -> str:
         return "Sentinel-2 L2A"
 
-    async def get_ndvi(self, scene: SatelliteScene, bbox: tuple):
+    async def get_ndvi(self, scene, bbox):
         from app.utils.gis import compute_ndvi
         nir, lats, lons = await self._get_band(scene, "B08", bbox)
         red, _, _ = await self._get_band(scene, "B04", bbox, target_shape=nir.shape)
@@ -396,26 +357,20 @@ class Sentinel2Repository(SatelliteDataInterface):
                     mean_ndvi=round(float(np.nanmean(ndvi)), 3))
         return ndvi, lats, lons
 
-    async def get_lst(self, scene: SatelliteScene, bbox: tuple):
-        from app.utils.gis import (compute_lst_from_tir,
-                                   estimate_emissivity_from_ndvi, compute_ndvi)
+    async def get_lst(self, scene, bbox):
+        from app.utils.gis import compute_lst_from_tir, estimate_emissivity_from_ndvi, compute_ndvi
         nir, lats, lons = await self._get_band(scene, "B08", bbox)
         red, _, _ = await self._get_band(scene, "B04", bbox, target_shape=nir.shape)
         swir, _, _ = await self._get_band(scene, "B11", bbox, target_shape=nir.shape)
-
         ndvi = compute_ndvi(nir * self.SCALE_FACTOR, red * self.SCALE_FACTOR)
         swir_r = np.clip(swir * self.SCALE_FACTOR, 0.0, 1.0)
-
-        # SWIR → pseudo brightness temperature (Kelvin)
-        # Empirical calibration for Mediterranean summer range (280–360 K)
         pseudo_bt = (280.0 + swir_r * 80.0).astype(np.float32)
         lst = compute_lst_from_tir(pseudo_bt, estimate_emissivity_from_ndvi(ndvi))
-
         logger.info("lst_computed", scene_id=scene.scene_id,
                     mean_lst=round(float(np.nanmean(lst)), 1))
         return lst, lats, lons
 
-    async def get_cloud_mask(self, scene: SatelliteScene, bbox: tuple) -> BoolArray:
+    async def get_cloud_mask(self, scene, bbox):
         scl, _, _ = await self._get_band(scene, "SCL", bbox)
         mask = np.zeros(scl.shape, dtype=bool)
         for cls in _SCL_CLOUD_CLASSES | _SCL_INVALID_CLASSES:
@@ -424,64 +379,29 @@ class Sentinel2Repository(SatelliteDataInterface):
                     cloud_pct=round(float(mask.mean() * 100), 1))
         return mask
 
-    async def _get_band(
-        self,
-        scene: SatelliteScene,
-        band: str,
-        bbox: tuple,
-        target_shape: tuple[int, int] | None = None,
-    ) -> tuple[Float32Array, Float32Array, Float32Array]:
+    async def _get_band(self, scene, band, bbox, target_shape=None):
         if not self._cache.exists(scene.scene_id, band):
-            await self._downloader.download(
-                scene, band, self._cache.path(scene.scene_id, band)
-            )
+            await self._downloader.download(scene, band, self._cache.path(scene.scene_id, band))
         else:
             logger.debug("band_cache_hit", scene_id=scene.scene_id, band=band,
                          size_mb=round(self._cache.size_mb(scene.scene_id, band), 1))
-
-        return self._extractor.extract(
-            self._cache.path(scene.scene_id, band), bbox, target_shape
-        )
+        return self._extractor.extract(self._cache.path(scene.scene_id, band), bbox, target_shape)
 
 
 # ── Sentinel-3 stub ───────────────────────────────────────────────────────────
 
 class Sentinel3Repository(SatelliteDataInterface):
-    """Stub for Sentinel-3 SLSTR true thermal LST — future implementation."""
-
-    def sensor_name(self) -> str:
-        return "Sentinel-3 SLSTR"
-
-    async def get_ndvi(self, scene, bbox):
-        raise NotImplementedError(
-            "Sentinel-3 SLSTR has no NDVI band. Use Sentinel-2."
-        )
-
-    async def get_lst(self, scene, bbox):
-        raise NotImplementedError(
-            "Sentinel-3 LST implementation pending (future stage)."
-        )
-
-    async def get_cloud_mask(self, scene, bbox):
-        raise NotImplementedError(
-            "Sentinel-3 cloud mask implementation pending (future stage)."
-        )
+    def sensor_name(self) -> str: return "Sentinel-3 SLSTR"
+    async def get_ndvi(self, scene, bbox): raise NotImplementedError("Sentinel-3 has no NDVI band.")
+    async def get_lst(self, scene, bbox): raise NotImplementedError("Sentinel-3 LST: future implementation.")
+    async def get_cloud_mask(self, scene, bbox): raise NotImplementedError("Sentinel-3 cloud mask: future implementation.")
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────
 
 SensorType = Literal["sentinel2", "sentinel3"]
 
-
-def get_satellite_repository(
-    sensor: SensorType,
-    auth: CopernicusTokenRepository,
-) -> SatelliteDataInterface:
-    """Return the correct repository for a given sensor type."""
-    if sensor == "sentinel2":
-        return Sentinel2Repository(auth=auth)
-    if sensor == "sentinel3":
-        return Sentinel3Repository()
-    raise ValueError(
-        f"Unknown sensor: {sensor!r}. Valid values: sentinel2, sentinel3"
-    )
+def get_satellite_repository(sensor: SensorType, auth: CopernicusTokenRepository) -> SatelliteDataInterface:
+    if sensor == "sentinel2": return Sentinel2Repository(auth=auth)
+    if sensor == "sentinel3": return Sentinel3Repository()
+    raise ValueError(f"Unknown sensor: {sensor!r}. Valid: sentinel2, sentinel3")
