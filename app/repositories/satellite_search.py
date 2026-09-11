@@ -1,15 +1,11 @@
 """Sentinel-2 scene search via Copernicus OData API.
 
-Fix (2026-08): Corrected download URL format.
+Fix (2026-09): download_url must use download.dataspace.copernicus.eu
+not catalogue.dataspace.copernicus.eu.
 
-Old (broken): https://zipper.dataspace.copernicus.eu/api/v1/dataspace/products/{id}/$value
-New (correct): https://catalogue.dataspace.copernicus.eu/odata/v1/Products({id})/$value
-
-The zipper endpoint returns 404. The correct OData download URL is on the
-catalogue endpoint, using the OData Products({id})/$value format with
-parentheses around the ID - not a path segment.
-
-Also fix: archive endpoint for Open-Meteo returns 404 for recent dates.
+Official Copernicus docs show:
+  Search:   catalogue.dataspace.copernicus.eu/odata/v1/Products  ← search only
+  Download: download.dataspace.copernicus.eu/odata/v1/Products({id})/$value
 """
 from __future__ import annotations
 from datetime import date, timedelta
@@ -24,9 +20,9 @@ from app.repositories.copernicus_auth import CopernicusTokenRepository
 logger = get_logger(__name__)
 _SCENE_CACHE_TTL = 43_200
 
-# Correct Copernicus Data Space OData download base URL
-# Format: {DOWNLOAD_BASE}({scene_id})/$value
-_COPERNICUS_ODATA_DOWNLOAD = "https://catalogue.dataspace.copernicus.eu/odata/v1/Products"
+# Search uses catalogue host, download uses download host — different!
+_CATALOGUE_BASE = "https://catalogue.dataspace.copernicus.eu/odata/v1"
+_DOWNLOAD_BASE  = "https://download.dataspace.copernicus.eu/odata/v1/Products"
 
 
 @dataclass
@@ -74,7 +70,8 @@ class SatelliteSearchRepository:
             max_cloud_pct = self._settings.max_cloud_cover_pct
         start = target_date - timedelta(days=search_window_days)
         end = target_date + timedelta(days=1)
-        logger.info("satellite_search_start", target_date=str(target_date), max_cloud_pct=max_cloud_pct)
+        logger.info("satellite_search_start", target_date=str(target_date),
+                    max_cloud_pct=max_cloud_pct)
         scenes = await self._search_with_cache(bbox, start, end)
         candidates = [s for s in scenes
                       if s.cloud_cover_pct <= max_cloud_pct
@@ -118,11 +115,13 @@ class SatelliteSearchRepository:
     async def _query_all_pages(self, bbox, start, end) -> list[SatelliteScene]:
         all_scenes = []
         for page in range(self.MAX_PAGES):
-            page_scenes = await self._query_catalogue(bbox, start, end, skip=page * self.MAX_RESULTS_PER_PAGE)
+            page_scenes = await self._query_catalogue(
+                bbox, start, end, skip=page * self.MAX_RESULTS_PER_PAGE)
             all_scenes.extend(page_scenes)
             if len(page_scenes) < self.MAX_RESULTS_PER_PAGE:
                 break
-        logger.info("satellite_search_complete", total=len(all_scenes), start=str(start), end=str(end))
+        logger.info("satellite_search_complete", total=len(all_scenes),
+                    start=str(start), end=str(end))
         return all_scenes
 
     async def _query_catalogue(self, bbox, start, end, top=None, skip=0) -> list[SatelliteScene]:
@@ -142,11 +141,14 @@ class SatelliteSearchRepository:
                   "$top": str(page_size), "$skip": str(skip), "$expand": "Attributes"}
         async with httpx.AsyncClient(timeout=30) as client:
             try:
-                response = await client.get(f"{self._settings.copernicus_search_url}/Products",
-                    params=params, headers={"Authorization": f"Bearer {token}"})
+                response = await client.get(
+                    f"{_CATALOGUE_BASE}/Products",
+                    params=params,
+                    headers={"Authorization": f"Bearer {token}"})
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
-                raise SatelliteDataError(f"Catalogue query failed ({exc.response.status_code})") from exc
+                raise SatelliteDataError(
+                    f"Catalogue query failed ({exc.response.status_code})") from exc
         return self._parse_results(response.json())
 
     def _parse_results(self, data: dict) -> list[SatelliteScene]:
@@ -156,11 +158,8 @@ class SatelliteSearchRepository:
                 attrs = {a["Name"]: a.get("Value") for a in item.get("Attributes", [])}
                 scene_id = item["Id"]
 
-                # FIX: Use OData catalogue URL format for download, not the zipper endpoint.
-                # Old (broken): https://zipper.dataspace.copernicus.eu/.../{id}/$value  → 404
-                # New (correct): https://catalogue.dataspace.copernicus.eu/odata/v1/Products({id})/$value
-                # Note the parentheses around the ID - this is the OData standard.
-                download_url = f"{_COPERNICUS_ODATA_DOWNLOAD}({scene_id})/$value"
+                # FIX: use download. host, not catalogue. host
+                download_url = f"{_DOWNLOAD_BASE}({scene_id})/$value"
 
                 scenes.append(SatelliteScene(
                     scene_id=scene_id,
@@ -175,5 +174,6 @@ class SatelliteSearchRepository:
                     size_mb=round((item.get("ContentLength") or 0) / 1_048_576, 1),
                     online=bool(item.get("Online", True))))
             except (KeyError, ValueError, TypeError) as exc:
-                logger.warning("scene_parse_error", item_id=item.get("Id","?"), error=str(exc))
+                logger.warning("scene_parse_error", item_id=item.get("Id", "?"),
+                               error=str(exc))
         return scenes
