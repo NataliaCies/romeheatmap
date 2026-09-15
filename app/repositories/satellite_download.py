@@ -1,17 +1,17 @@
 """Sentinel-2 band download and raster processing.
 
-Fix (2026-09-v6): Wrong download host + auth not propagating on redirects.
+Fix (2026-09-v7): Use correct Copernicus download host and session approach.
 
 Official Copernicus documentation shows:
-  - Search:   catalogue.dataspace.copernicus.eu/odata/v1/Products
-  - Download: download.dataspace.copernicus.eu/odata/v1/Products({id})/$value
+  url = "https://zipper.dataspace.copernicus.eu/odata/v1/Products({id})/$value"
+  session = requests.Session()
+  session.headers.update({"Authorization": f"Bearer {token}"})
+  response = session.get(url, stream=True)
 
-Our satellite_search.py was building URLs with 'catalogue.' host — correct
-for search but returns 401 for downloads.
-
-Also: use aiohttp instead of httpx for downloads because aiohttp's
-TCPConnector properly propagates session headers through redirects without
-needing custom auth classes.
+Key points:
+1. Host is zipper.dataspace.copernicus.eu (not catalogue. or download.)
+2. Token must be set at SESSION level (not per-request) so it persists through redirects
+3. We use httpx with default_headers to replicate session-level headers
 """
 
 from __future__ import annotations
@@ -50,17 +50,13 @@ _SCL_INVALID_CLASSES = {0, 1}
 BAND_CACHE_DIR = Path("/tmp/rome_satellite_cache")
 BAND_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-# Correct Copernicus download host (different from catalogue/search host)
-_DOWNLOAD_HOST = "https://download.dataspace.copernicus.eu"
+# Official Copernicus zipper host for product downloads
+_ZIPPER_BASE = "https://zipper.dataspace.copernicus.eu/odata/v1/Products"
 
 
 def _make_download_url(scene_id: str) -> str:
-    """Build the correct Copernicus download URL for a scene.
-
-    Uses download.dataspace.copernicus.eu (not catalogue.) as per
-    official Copernicus documentation.
-    """
-    return f"{_DOWNLOAD_HOST}/odata/v1/Products({scene_id})/$value"
+    """Build the correct Copernicus download URL using the zipper host."""
+    return f"{_ZIPPER_BASE}({scene_id})/$value"
 
 
 # ── Abstract interface ────────────────────────────────────────────────────────
@@ -154,11 +150,16 @@ class RasterWindowExtractor:
 # ── Copernicus band downloader ────────────────────────────────────────────────
 
 class CopernicusBandDownloader:
-    """Download Sentinel-2 bands using the correct Copernicus download host.
+    """Download Sentinel-2 bands using the official Copernicus zipper endpoint.
 
-    Key fix: use download.dataspace.copernicus.eu (not catalogue.)
-    as per official Copernicus documentation. The catalogue host is
-    for search only and returns 401 on download redirects.
+    From official Copernicus docs:
+        url = "https://zipper.dataspace.copernicus.eu/odata/v1/Products({id})/$value"
+        session = requests.Session()
+        session.headers.update({"Authorization": f"Bearer {token}"})
+        response = session.get(url, stream=True)
+
+    The token must be in the session default headers (not just per-request)
+    so it persists through any redirects.
     """
 
     _DOWNLOAD_TIMEOUT = 300
@@ -169,8 +170,6 @@ class CopernicusBandDownloader:
 
     async def download(self, scene: SatelliteScene, band_name: str, dest: Path) -> None:
         token = await self._auth.get_token()
-
-        # Use correct download host, not the catalogue host
         url = _make_download_url(scene.scene_id)
 
         logger.info("band_download_start", scene_id=scene.scene_id,
@@ -201,19 +200,17 @@ class CopernicusBandDownloader:
                     band=band_name, size_kb=len(raw) // 1024)
 
     async def _stream(self, url: str, token: str) -> bytes | None:
-        """Stream download with Bearer token on all requests including redirects.
+        """Download using session-level Authorization header.
 
-        Uses a transport that always sends Authorization header,
-        matching the requests.Session() approach in official Copernicus docs.
+        Sets the token as a default header on the AsyncClient so it is
+        sent on every request including after redirects — equivalent to
+        requests.Session().headers.update({"Authorization": ...}).
         """
-        headers = {"Authorization": f"Bearer {token}"}
-
-        # Use a custom transport that re-adds auth header on every request
-        # This is equivalent to requests.Session().headers.update(headers)
         async with httpx.AsyncClient(
             timeout=self._DOWNLOAD_TIMEOUT,
             follow_redirects=True,
-            headers=headers,  # Sets default headers for ALL requests incl. redirects
+            # Session-level headers: sent on EVERY request including after redirect
+            headers={"Authorization": f"Bearer {token}"},
         ) as client:
             try:
                 async with client.stream("GET", url) as resp:
@@ -225,8 +222,9 @@ class CopernicusBandDownloader:
                         return None
                     if resp.status_code == 401:
                         raise SatelliteDataError(
-                            f"Band download HTTP 401 — token invalid or expired. "
-                            f"URL: {url}"
+                            f"Band download HTTP 401 from zipper endpoint. "
+                            f"Check COPERNICUS_CLIENT_ID and CLIENT_SECRET "
+                            f"in Render environment variables. URL: {url}"
                         )
                     if not resp.is_success:
                         raise SatelliteDataError(
@@ -237,8 +235,8 @@ class CopernicusBandDownloader:
                     async for chunk in resp.aiter_bytes(chunk_size=65_536):
                         chunks.append(chunk)
                         downloaded += len(chunk)
-                    logger.info("band_stream_complete", bytes_downloaded=downloaded,
-                                band=band_name)
+                    logger.info("band_stream_complete",
+                                bytes_downloaded=downloaded, band=band_name)
                     return b"".join(chunks)
             except httpx.RequestError as exc:
                 raise SatelliteDataError(
@@ -247,6 +245,7 @@ class CopernicusBandDownloader:
 
     @staticmethod
     def _unzip_band(raw: bytes, band_name: str) -> bytes:
+        """Extract band from Sentinel-2 SAFE ZIP (bands stored as .jp2)."""
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
             rasters = [
                 name for name in zf.namelist()

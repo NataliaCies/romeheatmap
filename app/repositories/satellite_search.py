@@ -22,7 +22,7 @@ _SCENE_CACHE_TTL = 43_200
 
 # Search uses catalogue host, download uses download host — different!
 _CATALOGUE_BASE = "https://catalogue.dataspace.copernicus.eu/odata/v1"
-_DOWNLOAD_BASE  = "https://download.dataspace.copernicus.eu/odata/v1/Products"
+_ZIPPER_BASE = "https://zipper.dataspace.copernicus.eu/odata/v1/Products"
 
 
 @dataclass
@@ -159,7 +159,7 @@ class SatelliteSearchRepository:
                 scene_id = item["Id"]
 
                 # FIX: use download. host, not catalogue. host
-                download_url = f"{_DOWNLOAD_BASE}({scene_id})/$value"
+                download_url = f"{_ZIPPER_BASE}({scene_id})/$value"
 
                 scenes.append(SatelliteScene(
                     scene_id=scene_id,
