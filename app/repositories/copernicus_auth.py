@@ -1,6 +1,15 @@
-"""Copernicus Data Space OAuth2 token management with retry and async lock."""
+"""Copernicus Data Space authentication.
+
+Two separate auth flows:
+  1. client_credentials (CLIENT_ID + CLIENT_SECRET) → for catalogue search
+  2. password grant (USERNAME + PASSWORD, client_id=cdse-public) → for zipper download
+
+The zipper endpoint requires a token obtained via password grant.
+Client credentials tokens are rejected by the zipper with HTTP 401.
+"""
 from __future__ import annotations
-import asyncio, time
+import asyncio
+import time
 from dataclasses import dataclass
 import httpx
 from app.core.config import get_settings
@@ -11,31 +20,52 @@ logger = get_logger(__name__)
 _TOKEN_REFRESH_BUFFER_SECONDS = 60
 _MAX_RETRIES = 3
 _RETRY_BACKOFF_SECONDS = 2.0
+_TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
 
 
 @dataclass
 class TokenInfo:
-    access_token: str; expires_in: int; obtained_at: float
+    access_token: str
+    expires_in: int
+    obtained_at: float
 
     @property
-    def expires_at(self) -> float: return self.obtained_at + self.expires_in
+    def expires_at(self) -> float:
+        return self.obtained_at + self.expires_in
+
     @property
-    def is_valid(self) -> bool: return time.monotonic() < self.expires_at - _TOKEN_REFRESH_BUFFER_SECONDS
+    def is_valid(self) -> bool:
+        return time.monotonic() < self.expires_at - _TOKEN_REFRESH_BUFFER_SECONDS
+
     @property
-    def seconds_remaining(self) -> float: return max(0.0, self.expires_at - time.monotonic())
+    def seconds_remaining(self) -> float:
+        return max(0.0, self.expires_at - time.monotonic())
 
 
 class CopernicusTokenRepository:
+    """Manages Copernicus OAuth2 tokens.
+
+    Uses password grant (username + password) for download tokens —
+    these work on the zipper endpoint. Falls back to client_credentials
+    for search-only if username/password not available.
+    """
+
     def __init__(self) -> None:
         self._token_info: TokenInfo | None = None
         self._refresh_lock = asyncio.Lock()
         self._settings = get_settings()
 
     def is_configured(self) -> bool:
-        return bool(self._settings.copernicus_client_id and self._settings.copernicus_client_secret)
+        s = self._settings
+        # Configured if we have either (user+pass) or (client_id+secret)
+        has_userpass = bool(getattr(s, 'copernicus_user', '') and
+                           getattr(s, 'copernicus_password', ''))
+        has_client = bool(s.copernicus_client_id and s.copernicus_client_secret)
+        return has_userpass or has_client
 
     @property
-    def token_info(self) -> TokenInfo | None: return self._token_info
+    def token_info(self) -> TokenInfo | None:
+        return self._token_info
 
     async def get_token(self) -> str:
         if self._token_info and self._token_info.is_valid:
@@ -49,39 +79,76 @@ class CopernicusTokenRepository:
         if not self.is_configured():
             raise CopernicusAuthError(
                 "Copernicus credentials not configured. "
-                "Set COPERNICUS_CLIENT_ID and CLIENT_SECRET. "
-                "Register free at: https://dataspace.copernicus.eu")
+                "Set COPERNICUS_USER + COPERNICUS_PASSWORD in Render environment variables."
+            )
         last_error = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
                 return await self._fetch_token()
-            except CopernicusAuthError: raise
+            except CopernicusAuthError:
+                raise
             except (httpx.RequestError, httpx.TimeoutException) as exc:
                 last_error = exc
                 if attempt < _MAX_RETRIES:
                     wait = _RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
-                    logger.warning("copernicus_token_retry", attempt=attempt, wait=wait, error=str(exc))
+                    logger.warning("copernicus_token_retry", attempt=attempt,
+                                   wait=wait, error=str(exc))
                     await asyncio.sleep(wait)
-        raise CopernicusAuthError(f"Token fetch failed after {_MAX_RETRIES} attempts: {last_error}")
+        raise CopernicusAuthError(
+            f"Token fetch failed after {_MAX_RETRIES} attempts: {last_error}"
+        )
 
     async def _fetch_token(self) -> str:
         s = self._settings
-        payload = {"grant_type": "client_credentials",
-                   "client_id": s.copernicus_client_id,
-                   "client_secret": s.copernicus_client_secret}
+        has_userpass = bool(getattr(s, 'copernicus_user', '') and
+                           getattr(s, 'copernicus_password', ''))
+
+        if has_userpass:
+            # Password grant — works for BOTH search and zipper download
+            payload = {
+                "grant_type": "password",
+                "client_id": "cdse-public",
+                "username": s.copernicus_user,
+                "password": s.copernicus_password,
+            }
+            logger.info("copernicus_auth_using_password_grant")
+        else:
+            # Client credentials — works for search only (NOT zipper download)
+            payload = {
+                "grant_type": "client_credentials",
+                "client_id": s.copernicus_client_id,
+                "client_secret": s.copernicus_client_secret,
+            }
+            logger.warning("copernicus_auth_using_client_credentials_only",
+                           note="This token will NOT work for zipper download. "
+                                "Add COPERNICUS_USER and COPERNICUS_PASSWORD.")
+
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(s.copernicus_token_url, data=payload,
-                headers={"Content-Type": "application/x-www-form-urlencoded"})
+            response = await client.post(
+                _TOKEN_URL,
+                data=payload,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+
         if response.status_code == 401:
-            raise CopernicusAuthError("Copernicus auth 401 — check CLIENT_ID and CLIENT_SECRET.")
+            raise CopernicusAuthError(
+                "Copernicus auth 401 — check credentials in Render environment variables."
+            )
         if response.status_code == 400:
-            raise CopernicusAuthError(f"Copernicus auth 400: {response.text[:200]}")
+            raise CopernicusAuthError(
+                f"Copernicus auth 400: {response.text[:200]}"
+            )
         if not response.is_success:
-            raise CopernicusAuthError(f"Copernicus auth {response.status_code}: {response.text[:200]}")
+            raise CopernicusAuthError(
+                f"Copernicus auth {response.status_code}: {response.text[:200]}"
+            )
+
         data = response.json()
         if "access_token" not in data:
             raise CopernicusAuthError(f"No access_token in response: {data}")
+
         expires_in = int(data.get("expires_in", 600))
         self._token_info = TokenInfo(data["access_token"], expires_in, time.monotonic())
-        logger.info("copernicus_token_obtained", expires_in=expires_in)
+        logger.info("copernicus_token_obtained", expires_in=expires_in,
+                    grant_type=payload["grant_type"])
         return self._token_info.access_token
